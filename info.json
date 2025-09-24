@@ -1,0 +1,11 @@
+{
+  "name": "click2move",
+  "version": "0.1.0",
+  "title": "Click to Move",
+  "author": "Henrique",
+  "factorio_version": "2.0",
+  "dependencies": [
+    "base >= 2.0"
+  ],
+  "description": "Allows players to shift-click to move their character to a destination."
+}

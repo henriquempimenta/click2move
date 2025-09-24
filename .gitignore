@@ -1,0 +1,15 @@
+# Packaged mod zip file
+*.zip
+
+# User-specific editor/IDE files
+.vscode/
+.idea/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Common backup file patterns
+*~
+*.bak
+*.swp
