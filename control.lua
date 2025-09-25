@@ -77,11 +77,40 @@ local on_custom_input
 local on_path_request_finished
 local on_tick
 
+-- Helper function to create path request parameters
+local function create_path_request_params(player, goal)
+  local entity_to_move = player.vehicle or player.character
+  if not entity_to_move then return nil end
+
+  local start_pos = entity_to_move.position
+  local pathfind_for_character = not player.vehicle
+
+  local bounding_box = entity_to_move.prototype.collision_box
+  -- For characters, use a slightly larger bounding box to avoid getting stuck on corners.
+  if pathfind_for_character then
+    local margin = 0.45 -- Increase this value for more clearance
+    bounding_box = {
+      left_top = { x = bounding_box.left_top.x - margin, y = bounding_box.left_top.y - margin },
+      right_bottom = { x = bounding_box.right_bottom.x + margin, y = bounding_box.right_bottom.y + margin }
+    }
+  end
+
+  return {
+    bounding_box = bounding_box,
+    collision_mask = entity_to_move.prototype.collision_mask,
+    start = start_pos,
+    goal = goal,
+    pathfind_flags = { allow_destroy_friendly_entities = pathfind_for_character, cache = not pathfind_for_character },
+    force = player.force.name,
+    entity_to_ignore = entity_to_move
+  }
+end
+
 -- Constants
 local PROXIMITY_THRESHOLD = 1.5
 local UPDATE_INTERVAL = 1 -- Ticks between movement updates (1 for smoother movement)
 local VEHICLE_PROXIMITY_THRESHOLD = 6.0
-local DEBUG_MODE = true -- Set to false to disable debug messages
+local DEBUG_MODE = false -- Set to false to disable debug messages
 
 -- A non-persistent table to store active movement data.
 -- It will be cleared on game load.
@@ -106,24 +135,12 @@ on_custom_input = function(event)
 
   -- Store the original goal for potential retries
   local goal = event.cursor_position
-  local start_pos = player.vehicle and player.vehicle.position or player.character.position
-  local entity_to_move = player.vehicle or player.character
-  if not entity_to_move then return end
 
-  -- For vehicles, we don't need a complex path. We'll just drive towards the goal.
-  -- For characters, we request a path.
-  local pathfind_for_character = not player.vehicle
+  local path_params = create_path_request_params(player, goal)
+  if not path_params then return end
 
   -- Request path and store the ID for matching in the callback
-  local path_id = player.surface.request_path {
-    bounding_box = entity_to_move.prototype.collision_box,
-    collision_mask = entity_to_move.prototype.collision_mask,
-    start = start_pos,
-    goal = goal,
-    pathfind_flags = { allow_destroy_friendly_entities = pathfind_for_character, cache = not pathfind_for_character },
-    force = player.force.name,
-    entity_to_ignore = entity_to_move
-  }
+  local path_id = player.surface.request_path(path_params)
 
   -- Temporarily store the path ID and goal
   player_move_data[player.index] = { path_id = path_id, goal = goal, requesting_player_index = player.index }
@@ -188,19 +205,9 @@ on_path_request_finished = function(event)
       script.on_nth_tick(game.tick + 60, function()
         local still_valid_player = game.players[matched_player_index]
         if still_valid_player and (still_valid_player.character or still_valid_player.vehicle) then
-          local entity_to_move = still_valid_player.vehicle or still_valid_player.character
-          if not entity_to_move then return end
-          local start_pos = entity_to_move.position
-          local pathfind_for_character = not still_valid_player.vehicle
-          local retry_path_id = still_valid_player.surface.request_path {
-            bounding_box = entity_to_move.prototype.collision_box,
-            collision_mask = entity_to_move.prototype.collision_mask,
-            start = start_pos,
-            goal = retry_goal,
-            pathfind_flags = { allow_destroy_friendly_entities = pathfind_for_character, cache = not pathfind_for_character },
-            force = still_valid_player.force.name,
-            entity_to_ignore = entity_to_move
-          }
+          local path_params = create_path_request_params(still_valid_player, retry_goal)
+          if not path_params then player_move_data[matched_player_index] = nil; return end
+          local retry_path_id = still_valid_player.surface.request_path(path_params)
           player_move_data[matched_player_index] = { path_id = retry_path_id, goal = retry_goal, requesting_player_index = matched_player_index }
         else
           player_move_data[matched_player_index] = nil
