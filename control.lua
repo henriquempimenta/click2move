@@ -106,7 +106,7 @@ on_custom_input = function(event)
 
   -- Store the original goal for potential retries
   local goal = event.cursor_position
-  local start_pos = player.vehicle and player.vehicle.position or player.position
+  local start_pos = player.vehicle and player.vehicle.position or player.character.position
   local entity_to_move = player.vehicle or player.character
   if not entity_to_move then return end
 
@@ -265,12 +265,16 @@ on_tick = function(event)
               if DEBUG_MODE then
                 player.print("Click2Move: Setting walk to true, direction: " .. direction)
               end
-              character.walking_state.walking = true
-              character.walking_state.direction = direction
+              character.walking_state = {
+                walking = true,
+                direction = direction
+              }
             else
               -- Reached waypoint, let's check next one on next tick
-              character.walking_state.walking = false
-              stop_movement = true
+              character.walking_state = {
+                walking = false,
+                direction = defines.direction.north,
+              }
             end
           else
             stop_movement = true
@@ -310,7 +314,16 @@ end
 -- Centralized function for event registration
 local function initialize()
   script.on_event("c2m-move-command", on_custom_input)
-  script.on_event("bazinga", function (event) game.print("bazinga!") end)
+  script.on_event("bazinga", function (event)
+    game.print("bazinga!")
+    player = game.players[event.player_index]
+    if player then
+      player.character.walking_state = {
+        walking = true,
+        direction = defines.direction.north
+      }
+    end
+  end)
   script.on_event(defines.events.on_script_path_request_finished, on_path_request_finished)
   script.on_nth_tick(UPDATE_INTERVAL, on_tick)
   -- Clear data on load
