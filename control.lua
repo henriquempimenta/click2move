@@ -88,7 +88,7 @@ local function create_path_request_params(player, goal)
   local bounding_box = entity_to_move.prototype.collision_box
   -- For characters, use a slightly larger bounding box to avoid getting stuck on corners.
   if pathfind_for_character then
-    local margin = 0.45 -- Increase this value for more clearance
+    local margin = settings.global["c2m-character-margin"].value -- Increase this value for more clearance
     bounding_box = {
       left_top = { x = bounding_box.left_top.x - margin, y = bounding_box.left_top.y - margin },
       right_bottom = { x = bounding_box.right_bottom.x + margin, y = bounding_box.right_bottom.y + margin }
@@ -107,10 +107,20 @@ local function create_path_request_params(player, goal)
 end
 
 -- Constants
-local PROXIMITY_THRESHOLD = 1.5
-local UPDATE_INTERVAL = 1 -- Ticks between movement updates (1 for smoother movement)
-local VEHICLE_PROXIMITY_THRESHOLD = 6.0
-local DEBUG_MODE = false -- Set to false to disable debug messages
+
+local PROXIMITY_THRESHOLD = function ()
+  return settings.startup["c2m-character-proximity-threshold"].value
+end
+-- Ticks between movement updates
+local UPDATE_INTERVAL = function ()
+  return settings.startup["c2m-update-interval"].value
+end
+local VEHICLE_PROXIMITY_THRESHOLD = function ()
+  return settings.startup["c2m-vehicle-proximity-threshold"].value
+end
+local DEBUG_MODE = function (player_index)
+  return settings.get_player_settings(player_index)["c2m-debug-mode"].value
+end
 
 -- A non-persistent table to store active movement data.
 -- It will be cleared on game load.
@@ -131,7 +141,7 @@ on_custom_input = function(event)
     player_move_data[player.index] = nil
   end
 
-  if DEBUG_MODE then player.print("Click2Move: Path request initiated.") end
+  if DEBUG_MODE(event.player_index) then player.print("Click2Move: Path request initiated.") end
 
   -- Store the original goal for potential retries
   local goal = event.cursor_position
@@ -167,7 +177,7 @@ on_path_request_finished = function(event)
   current_data.path_id = nil
 
   if event.path and #event.path > 0 then
-    if DEBUG_MODE then player.print("Path found with " .. #event.path .. " waypoints.") end
+    if DEBUG_MODE(matched_player_index) then player.print("Path found with " .. #event.path .. " waypoints.") end
     -- Store the path and reset state
     player_move_data[matched_player_index] = {
       path = event.path,
@@ -200,7 +210,7 @@ on_path_request_finished = function(event)
   else
     if event.try_again_later then
       -- Re-request after a short delay, using stored goal
-      if DEBUG_MODE then player.print("Click2Move: Path temporarily unavailable, retrying...") end
+      if DEBUG_MODE(matched_player_index) then player.print("Click2Move: Path temporarily unavailable, retrying...") end
       local retry_goal = current_data.goal
       script.on_nth_tick(game.tick + 60, function()
         local still_valid_player = game.players[matched_player_index]
@@ -240,12 +250,12 @@ on_tick = function(event)
       local vehicle = player.vehicle
       local distance = util_vector.distance(vehicle.position, data.goal)
 
-      if distance < VEHICLE_PROXIMITY_THRESHOLD then
+      if distance < VEHICLE_PROXIMITY_THRESHOLD() then
         stop_movement = true
         player.riding_state = { direction = defines.riding.direction.straight, acceleration = defines.riding.acceleration.braking }
       else
         -- If player takes manual control of vehicle, cancel auto-drive
-        if player.manual_driving then
+        if player.driving then
           stop_movement = true
         else
           player.riding_state = get_vehicle_riding_state(vehicle, data.goal)
@@ -257,7 +267,7 @@ on_tick = function(event)
       if waypoint and waypoint.position then
         local distance = util_vector.distance(character.position, waypoint.position)
 
-        if distance < PROXIMITY_THRESHOLD then
+        if distance < PROXIMITY_THRESHOLD() then
           data.current_waypoint = data.current_waypoint + 1
         end
 
@@ -269,7 +279,7 @@ on_tick = function(event)
           if waypoint and waypoint.position then
             local direction = get_character_direction(character.position, waypoint.position)
             if direction then
-              if DEBUG_MODE then
+              if DEBUG_MODE(player_index) then
                 player.print("Click2Move: Setting walk to true, direction: " .. direction)
               end
               character.walking_state = {
@@ -332,7 +342,7 @@ local function initialize()
     end
   end)
   script.on_event(defines.events.on_script_path_request_finished, on_path_request_finished)
-  script.on_nth_tick(UPDATE_INTERVAL, on_tick)
+  script.on_nth_tick(UPDATE_INTERVAL(), on_tick)
   -- Clear data on load
   player_move_data = {}
 end
