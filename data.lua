@@ -8,6 +8,7 @@ data:extend {
   {
     type = "custom-input",
     name = "bazinga",
-    key_sequence = "CONTROL + B"
+    key_sequence = "CONTROL + B",
+    localised_name = {"custom-input-name.c2m-bazinga"}
   }
 }
