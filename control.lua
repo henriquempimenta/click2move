@@ -27,7 +27,7 @@ local function draw_target_crosshair(player, position)
   }
 end
 
--- Determines 8-way direction for character movement
+-- Determines 8-way direction for character movement (as double 0.0-1.0)
 local function get_character_direction(from, to)
   local distance = 0.1 -- Threshold to stop
   local dx = from.x - to.x
@@ -107,7 +107,6 @@ local function create_path_request_params(player, goal)
 end
 
 -- Constants
-
 local PROXIMITY_THRESHOLD = function ()
   return settings.startup["c2m-character-proximity-threshold"].value
 end
@@ -118,8 +117,11 @@ end
 local VEHICLE_PROXIMITY_THRESHOLD = function ()
   return settings.startup["c2m-vehicle-proximity-threshold"].value
 end
+local STUCK_THRESHOLD = function ()
+  return settings.startup["c2m-stuck-threshold"].value
+end
 local DEBUG_MODE = function (player_index)
-  return settings.get_player_settings(player_index)["c2m-debug-mode"].value
+  return settings.get_player_settings(game.players[player_index])["c2m-debug-mode"].value
 end
 
 -- A non-persistent table to store active movement data.
@@ -183,7 +185,10 @@ on_path_request_finished = function(event)
       path = event.path,
       current_waypoint = 1,
       is_cancelling = false,
-      goal = current_data.goal -- Preserve for any future needs
+      is_auto_walking = false, -- Flag to prevent self-cancellation
+      goal = current_data.goal, -- Preserve for any future needs
+      last_position = nil,
+      stuck_counter = 0
     }
 
     -- Render the path for the player to see (store rendering IDs to clean up later if needed)
@@ -242,12 +247,12 @@ on_tick = function(event)
     local player = game.players[player_index]
     local stop_movement = false
     local entity_to_move = player and (player.vehicle or player.character)
+    local vehicle = player.vehicle
 
     if not entity_to_move or not player.connected then
       stop_movement = true
-    elseif player.vehicle then
-      -- Handle vehicle movement
-      local vehicle = player.vehicle
+    elseif vehicle then
+      -- Handle vehicle movement (follow waypoints for safety)
       local distance = util_vector.distance(vehicle.position, data.goal)
 
       if distance < VEHICLE_PROXIMITY_THRESHOLD() then
@@ -262,9 +267,33 @@ on_tick = function(event)
         end
       end
     else
+      -- Handle character movement
       local character = player.character
       local waypoint = data.path[data.current_waypoint]
+
+      -- Stuck detection
+      if data.last_position then
+        local moved_dist = util_vector.distance(character.position, data.last_position)
+        if moved_dist < 0.05 then -- If moved less than a small amount
+          data.stuck_counter = data.stuck_counter + 1
+        else
+          data.stuck_counter = 0 -- Reset if moved
+        end
+      end
+      data.last_position = character.position
+
+      if data.stuck_counter > STUCK_THRESHOLD() then
+        if DEBUG_MODE(player_index) then player.print("Click2Move: Character is stuck, attempting to repath.") end
+        local path_params = create_path_request_params(player, data.goal)
+        if path_params then
+          data.path_id = player.surface.request_path(path_params)
+          data.path = nil -- Clear old path to indicate we are waiting for a new one
+        end
+        goto continue -- Skip rest of movement logic for this tick
+      end
+
       if waypoint and waypoint.position then
+        ---@diagnostic disable-next-line: need-check-nil
         local distance = util_vector.distance(character.position, waypoint.position)
 
         if distance < PROXIMITY_THRESHOLD() then
@@ -333,11 +362,11 @@ local function initialize()
   script.on_event("c2m-move-command", on_custom_input)
   script.on_event("bazinga", function (event)
     game.print("bazinga!")
-    player = game.players[event.player_index]
-    if player then
+    local player = game.players[event.player_index]
+    if player and player.character then
       player.character.walking_state = {
         walking = true,
-        direction = defines.direction.north
+        direction = 0.875  -- North as double
       }
     end
   end)

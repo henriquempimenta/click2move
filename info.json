@@ -7,5 +7,5 @@
   "dependencies": [
     "base >= 2.0"
   ],
-  "description": "Allows players to shift-click to move their character to a destination."
+  "description": "Allows players to middle click to move their character to a destination."
 }
