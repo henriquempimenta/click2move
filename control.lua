@@ -109,22 +109,19 @@ local function create_path_request_params(player, goal)
   if not entity_to_move then return nil end
 
   local start_pos = entity_to_move.position
-  local pathfind_for_character = not player.vehicle
 
   local bounding_box = entity_to_move.prototype and entity_to_move.prototype.collision_box or {{-0.2,-0.2},{0.2,0.2}}
-  if pathfind_for_character then
-    local margin = settings.global["c2m-character-margin"] and settings.global["c2m-character-margin"].value or 0.45
-    if bounding_box.left_top and bounding_box.right_bottom then
-      bounding_box = {
-        left_top = { x = bounding_box.left_top.x - margin, y = bounding_box.left_top.y - margin },
-        right_bottom = { x = bounding_box.right_bottom.x + margin, y = bounding_box.right_bottom.y + margin }
-      }
-    else
-      bounding_box = {
-        left_top = { x = -margin, y = -margin },
-        right_bottom = { x = margin, y = margin }
-      }
-    end
+  local margin = (not player.vehicle) and (settings.global["c2m-character-margin"].value) or (settings.startup["c2m-vehicle-path-margin"].value)
+  if bounding_box.left_top and bounding_box.right_bottom then
+    bounding_box = {
+      left_top = { x = bounding_box.left_top.x - margin, y = bounding_box.left_top.y - margin },
+      right_bottom = { x = bounding_box.right_bottom.x + margin, y = bounding_box.right_bottom.y + margin }
+    }
+  else
+    bounding_box = {
+      left_top = { x = -margin, y = -margin },
+      right_bottom = { x = margin, y = margin }
+    }
   end
 
   local collision_mask = (entity_to_move.prototype and entity_to_move.prototype.collision_mask) and entity_to_move.prototype.collision_mask or {}
@@ -134,7 +131,7 @@ local function create_path_request_params(player, goal)
     collision_mask = collision_mask,
     start = start_pos,
     goal = goal,
-    pathfind_flags = { allow_destroy_friendly_entities = pathfind_for_character, cache = not pathfind_for_character },
+    pathfind_flags = { allow_destroy_friendly_entities = (not player.vehicle), cache = (player.vehicle ~= nil) },
     force = player.force.name,
     entity_to_ignore = entity_to_move
   }
@@ -152,6 +149,9 @@ local function VEHICLE_PROXIMITY_THRESHOLD()
 end
 local function STUCK_THRESHOLD()
   return settings.startup["c2m-stuck-threshold"] and settings.startup["c2m-stuck-threshold"].value or 30
+end
+local function VEHICLE_PATH_MARGIN()
+  return settings.startup["c2m-vehicle-path-margin"] and settings.startup["c2m-vehicle-path-margin"].value or 1.0
 end
 local function DEBUG_MODE(player_index)
   local p = game.players[player_index]
@@ -181,7 +181,9 @@ local function ensure_player_data(player_index)
       last_position = nil,
       stuck_counter = 0,
       is_auto_walking = false,
-      goals = {} -- queue of goals (each is {x=..., y=...})
+      goals = {}, -- queue of goals (each is {x=..., y=...})
+      vehicle_stuck_counter = 0,
+      last_vehicle_position = nil
     }
     player_move_data[player_index] = d
   end
@@ -302,6 +304,8 @@ local function on_custom_input(event)
     data.stuck_counter = 0
     data.last_position = nil
     data.is_auto_walking = false
+    data.vehicle_stuck_counter = 0
+    data.last_vehicle_position = nil
     if DEBUG_MODE(player.index) then player.print("Click2Move: Set new goal: " .. format_pos(goal)) end
   end
 
@@ -339,14 +343,16 @@ local function on_path_request_finished(event)
     data.current_waypoint = 1
     data.stuck_counter = 0
     data.last_position = nil
+    data.vehicle_stuck_counter = 0
+    data.last_vehicle_position = nil
     data.retry_count = 0
     data.retry_at = nil
 
     -- render polyline using player's color (characters only)
     safe_destroy_renderings(data.render_objs)
     data.render_objs = {}
-
-    if not player.vehicle and data.path and #data.path > 0 then
+    
+    if data.path and #data.path > 0 then
       -- collect positions
       local points = {}
       for _, wp in ipairs(data.path) do
@@ -354,13 +360,20 @@ local function on_path_request_finished(event)
       end
 
       local path_color = player.color or {r = 0.1, g = 0.8, b = 0.1, a = 0.9}
-      if not path_color.a then path_color.a = 0.9 end
+      local path_width = 2
+      if player.vehicle then
+        path_color.a = 0.5
+        path_width = 1
+      else
+        path_color.a = 0.9
+      end
+      
 
       for i = 1, math.max(0, #points - 1) do
         local from = points[i]; local to = points[i+1]
         local seg = rendering.draw_line{
-          color = path_color,
-          width = 2,
+          color = path_color, 
+          width = path_width,
           from = from,
           to = to,
           surface = player.surface,
@@ -473,18 +486,63 @@ local function on_tick(event)
 
     if not entity_to_move then
       stop_movement = true
+
     elseif vehicle then
-      local dist = util_vector.distance(vehicle.position, data.goals[1] or data.path[#data.path].position)
-      if dist < VEHICLE_PROXIMITY_THRESHOLD() then
+      local waypoint = data.path[data.current_waypoint]
+      if not waypoint or not waypoint.position then
         stop_movement = true
-        player.riding_state = { direction = defines.riding.direction.straight, acceleration = defines.riding.acceleration.braking }
-      else
-        if player.driving then
-          stop_movement = true
+        goto continue  -- Invalid waypoint; bail
+      end
+
+      -- Stuck detection
+      if data.last_vehicle_position then
+        local moved = util_vector.distance(vehicle.position, data.last_vehicle_position)
+        if moved < 0.1 then
+          data.vehicle_stuck_counter = data.vehicle_stuck_counter + 1
         else
-          player.riding_state = get_vehicle_riding_state(vehicle, data.goals[1])
+          data.vehicle_stuck_counter = 0
         end
       end
+      data.last_vehicle_position = { x = vehicle.position.x, y = vehicle.position.y }
+
+      if data.vehicle_stuck_counter > STUCK_THRESHOLD() then
+        if DEBUG_MODE(player_index) then player.print("Click2Move: Vehicle stuck; re-pathing.") end
+        data.retry_count = (data.retry_count or 0) + 1
+        if data.retry_count <= MAX_PATH_RETRIES then
+          data.path = nil
+          data.path_id = nil
+          data.retry_at = game.tick + PATH_RETRY_DELAY_TICKS
+        else
+          -- Drop goal and try next
+          table.remove(data.goals, 1)
+          safe_destroy_renderings(data.render_objs)
+          data.render_objs = nil
+          data.path = nil
+          data.path_id = nil
+          data.retry_count = 0
+          update_gui_for_player(player_index)
+          if data.goals[1] then start_path_request_for_player(player_index) end
+        end
+        goto continue
+      end
+
+      local waypoint_pos = waypoint.position
+      local dist_wp = util_vector.distance(vehicle.position, waypoint_pos)
+      local waypoint_threshold = 2.0
+
+      if dist_wp < waypoint_threshold then
+        data.current_waypoint = data.current_waypoint + 1
+      end
+
+      if data.current_waypoint > #data.path then
+        local goal_pos = data.goals[1]
+        local dist_goal = util_vector.distance(vehicle.position, goal_pos)
+        if dist_goal < VEHICLE_PROXIMITY_THRESHOLD() then
+          stop_movement = true
+        end
+      end
+
+      player.riding_state = get_vehicle_riding_state(vehicle, data.path[data.current_waypoint] and data.path[data.current_waypoint].position or data.goals[1])
     else
       -- character handling
       local character = player.character
@@ -572,6 +630,8 @@ local function on_tick(event)
       data.is_auto_walking = false
       data.stuck_counter = 0
       data.last_position = nil
+      data.vehicle_stuck_counter = 0
+      data.last_vehicle_position = nil
       data.retry_count = 0
       data.retry_at = nil
 
