@@ -74,16 +74,16 @@ jobs:
           set -euxo pipefail
           VERSION="${{ steps.version.outputs.version }}"
           MOD_NAME="${{ steps.validate.outputs.name }}"
-          ZIP_NAME="${MOD_NAME}_${VERSION}.zip"
-          # Use git ls-files to include only tracked files (avoid untracked temp files)
-          # and exclude development/repo files that shouldn't be in the mod package.
-          git ls-files -z \
-            --exclude='.github/*' \
-            --exclude='.gitignore' \
-            --exclude='*.md' \
-            --exclude='*.txt' \
-            --exclude='*.yml' | \
-            xargs -0 zip "$ZIP_NAME" -@
+          DIR_NAME="${MOD_NAME}_${VERSION}"
+          ZIP_NAME="${DIR_NAME}.zip"
+
+          mkdir "$DIR_NAME"
+          # Copy all tracked files into the versioned folder
+          git ls-files -z | xargs -0 cp --parents -t "$DIR_NAME"
+
+          # Create the zip from that folder
+          zip -r "$ZIP_NAME" "$DIR_NAME"
+
           echo "zip_file=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Initialize publish
@@ -125,8 +125,7 @@ jobs:
         run: |
           set -euxo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          MOD_NAME="${{ steps.validate.outputs.name }}"
-          ZIP_FILE="${MOD_NAME}_${VERSION}.zip"
+          ZIP_FILE="${{ steps.create-zip.outputs.zip_file }}"
           if [ ! -f "$ZIP_FILE" ]; then
             echo "Zip file not found: $ZIP_FILE"
             ls -la
@@ -146,3 +145,12 @@ jobs:
           fi
           # Print JSON response prettily
           echo "$BODY" | jq .
+
+      - name: Clean up archive files
+        if: always() # Always run this step to clean up
+        run: |
+          set -euxo pipefail
+          DIR_NAME="${{ steps.validate.outputs.name }}_${{ steps.version.outputs.version }}"
+          ZIP_FILE="${DIR_NAME}.zip"
+          rm -rf "$DIR_NAME"
+          rm -f "$ZIP_FILE"
