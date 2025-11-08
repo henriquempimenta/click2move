@@ -116,8 +116,8 @@ jobs:
           fi
           set -euxo pipefail
           MOD_NAME="${{ steps.validate.outputs.name }}"
-          # POST to init_publish; capture body and HTTP code
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://mods.factorio.com/api/v2/mods/init_publish" \
+          VERSION="${{ steps.version.outputs.version }}"
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://mods.factorio.com/api/v2/mods/releases/init_publish" \
             -H "Authorization: Bearer $API_KEY" \
             -F "mod=$MOD_NAME")
           HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
@@ -132,7 +132,7 @@ jobs:
           fi
           UPLOAD_URL=$(echo "$BODY" | jq -r '.upload_url // empty')
           if [ -z "$UPLOAD_URL" ]; then
-            echo "init_publish response didn't include upload_url"
+            echo "Response didn't include upload_url"
             echo "$BODY" | jq .
             exit 1
           fi
@@ -152,7 +152,8 @@ jobs:
           fi
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$UPLOAD_URL" \
             -F "file=@$ZIP_FILE" \
-            -F "source_url=${{ github.server_url }}/${{ github.repository }}")
+            -F "source_url=${{ github.server_url }}/${{ github.repository }}" \
+            -F "changelog=@CHANGELOG.md")
           HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
           BODY=$(echo "$RESPONSE" | sed '$d')
           echo "HTTP code: $HTTP_CODE"
