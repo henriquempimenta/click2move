@@ -4,12 +4,6 @@
   Description: Allows players to click to move their character.
 ]]
 
--- Vector utilities
-local util_vector = {}
-util_vector.distance = function(a, b)
-  return math.sqrt((a.x - b.x)^2 + (a.y - b.y)^2)
-end
-
 -- Format position for GUI text
 local function format_pos(pos)
   if not pos then return "(?, ?)" end
@@ -116,36 +110,117 @@ local function get_vehicle_riding_state(vehicle, target_pos)
   return {direction = direction, acceleration = acceleration}
 end
 
--- Config getters
-local function CHARACTER_MARGIN()
-  local res = settings.global["c2m-character-margin"].value
-  if type(res) == "number" then return res end
-  return 0.5
+-- Safe destroy of rendering Lua objects (they are LuaRenderObject instances)
+---@param render_objs LuaRenderObject[]
+local function safe_destroy_renderings(render_objs)
+  if not render_objs then return end
+  for _, render_obj in ipairs(render_objs) do
+    if render_obj and render_obj.valid then
+      render_obj:destroy()
+    end
+  end
 end
-local function PROXIMITY_THRESHOLD()
-  local res = settings.startup["c2m-character-proximity-threshold"].value
-  if type(res) == "number" then return res end
-  return 1.5
+
+-- Squared distance (faster than sqrt for comparisons)
+---@param a MapPosition
+---@param b MapPosition
+---@return number
+local function distance_sq(a, b)
+  local dx = a.x - b.x
+  local dy = a.y - b.y
+  return dx * dx + dy * dy
 end
-local function UPDATE_INTERVAL()
-  local res = settings.startup["c2m-update-interval"].value
-  if type(res) == "number" then return res end
-  return 1
+
+-- Advance to next waypoint if close enough (shared for char/vehicle)
+local function advance_waypoint(data, current_pos, waypoint_pos, threshold_sq)
+  if distance_sq(current_pos, waypoint_pos) < threshold_sq then
+    data.current_waypoint = data.current_waypoint + 1
+    return true -- Advanced
+  end
+  return false
 end
-local function VEHICLE_PROXIMITY_THRESHOLD()
-  local res = settings.startup["c2m-vehicle-proximity-threshold"].value
-  if type(res) == "number" then return res end
-  return 6.0
+
+-- Detect stuck (shared, returns true if stuck)
+local function detect_stuck(data, current_pos, last_pos, counter_field, threshold, min_move)
+  if not last_pos then return false end
+  local moved_sq = distance_sq(current_pos, last_pos)
+  if math.sqrt(moved_sq) < min_move then  -- Use sqrt only here (rare)
+    data[counter_field] = data[counter_field] + 1
+  else
+    data[counter_field] = 0
+  end
+  return data[counter_field] > threshold
 end
-local function STUCK_THRESHOLD()
-  local res = settings.startup["c2m-stuck-threshold"].value
-  if type(res) == "number" then return res end
-  return 30
+
+-- Set character walking state
+local function set_character_walking(character, data, waypoint_pos)
+  local direction = get_character_direction(character.position, waypoint_pos)
+  if direction then
+    data.is_auto_walking = true
+    character.walking_state = { walking = true, direction = direction }
+  else
+    data.is_auto_walking = false
+    character.walking_state = { walking = false, direction = defines.direction.north }
+  end
 end
-local function VEHICLE_PATH_MARGIN()
-  local res = settings.startup["c2m-vehicle-path-margin"].value
-  if type(res) == "number" then return res end
-  return 1.0
+
+-- Set vehicle riding state
+local function set_vehicle_riding(player, vehicle, target_pos)
+  local riding = get_vehicle_riding_state(vehicle, target_pos)
+  player.riding_state = riding
+end
+
+-- Cleanup movement state (shared)
+local function cleanup_movement(entity_to_move, player, data)
+  if entity_to_move and entity_to_move.valid then
+    if entity_to_move.type == "character" then
+      entity_to_move.walking_state = { walking = false, direction = defines.direction.north }
+    elseif player.vehicle then
+      player.riding_state = { direction = defines.riding.direction.straight, acceleration = defines.riding.acceleration.braking }
+    end
+  end
+  safe_destroy_renderings(data.render_objs)
+  data.render_objs = nil
+  data.path = nil
+  data.path_id = nil
+  data.current_waypoint = 1
+  data.is_auto_walking = false
+  data.stuck_counter = 0
+  data.last_position = nil
+  data.vehicle_stuck_counter = 0
+  data.last_vehicle_position = nil
+  data.retry_count = 0
+  data.retry_at = nil
+  data.is_straight_line_move = nil
+end
+
+
+---@class Config
+---@field character_margin number
+---@field proximity_threshold number
+---@field update_interval number
+---@field vehicle_proximity_threshold number
+---@field stuck_threshold number
+---@field vehicle_path_margin number
+
+-- Cached config table (populated on init/load)
+---@type Config
+local config = {
+  character_margin = 0.5,
+  proximity_threshold = 1.5,
+  update_interval = 1,
+  vehicle_proximity_threshold = 6.0,
+  stuck_threshold = 30,
+  vehicle_path_margin = 1.0
+}
+
+local function load_config()
+  config.character_margin = settings.global["c2m-character-margin"].value or 0.5
+  config.proximity_threshold = settings.startup["c2m-character-proximity-threshold"].value or 1.5
+  config.update_interval = settings.startup["c2m-update-interval"].value or 1
+  config.vehicle_proximity_threshold = settings.startup["c2m-vehicle-proximity-threshold"].value or 6.0
+  config.stuck_threshold = settings.startup["c2m-stuck-threshold"].value or 30
+  config.vehicle_path_margin = settings.startup["c2m-vehicle-path-margin"].value or 1.0
 end
 
 ---@param player_index integer|string
@@ -153,10 +228,7 @@ end
 local function DEBUG_MODE(player_index)
   local p = game.players[player_index]
   if not p then return false end
-  local setts = settings.get_player_settings(p)
-  local res = setts["c2m-debug-mode"].value
-  if type(res) == "boolean" then return res end
-  return false
+  return settings.get_player_settings(p)["c2m-debug-mode"].value ~= false  -- Simplified check
 end
 
 -- Check if the player is wearing "mech-armor"
@@ -226,9 +298,9 @@ local function create_path_request_params(player, goal)
   ---@type number
   local margin = 0
   if player.vehicle then
-    margin = VEHICLE_PATH_MARGIN()
+    margin = config.vehicle_path_margin
   else
-    margin = CHARACTER_MARGIN()
+    margin = config.character_margin
   end
 
   if bounding_box.left_top and bounding_box.right_bottom then
@@ -303,30 +375,20 @@ local function update_gui_for_player(player_index)
   end
 end
 
--- Safe destroy of rendering Lua objects (they are LuaRenderObject instances)
----@param render_objs LuaRenderObject[]
-local function safe_destroy_renderings(render_objs)
-  if not render_objs then return end
-  for _, render_obj in ipairs(render_objs) do
-    if render_obj and render_obj.valid then
-      render_obj:destroy()
-    end
-  end
-end
-
 -- Start a path request for the player's current first goal (if any)
 ---@param player_index integer | string
+---@return boolean
 local function start_path_request_for_player(player_index)
   local player = game.players[player_index]
-  if not player or not player.valid or not player.connected then return end
+  if not player or not player.valid or not player.connected then return false end
   local data = ensure_player_data(player_index)
-  if not data.goals or #data.goals == 0 then return end
-  if data.path or data.path_id then return end -- already waiting or following a path
+  if not data.goals or #data.goals == 0 then return false end
+  if data.path or data.path_id then return true end -- already waiting or following a path
   local entity_to_move = player.vehicle or player.character
-  if not entity_to_move then return end
+  if not entity_to_move then return false end
 
   local goal = data.goals[1]
-  if not goal then return end
+  if not goal then return false end
 
   local params = create_path_request_params(player, goal)
   if not params then
@@ -335,14 +397,56 @@ local function start_path_request_for_player(player_index)
     update_gui_for_player(player_index)
     -- try next if present
     if data.goals[1] then start_path_request_for_player(player_index) end
-    return
+    return true
   end
 
   -- Request path on the correct surface (where the entity is)
   local path_id = entity_to_move.surface.request_path(params)
   data.path_id = path_id
   data.retry_count = data.retry_count or 0
-  if DEBUG_MODE(player_index) then player.print("Click2Move: Requested path for " .. format_pos(goal) .. " (player " .. player_index .. ")") end
+  if DEBUG_MODE(player_index) then
+    player.print("Click2Move: Requested path for " .. format_pos(goal) .. " (player " .. player_index .. ")")
+  end
+  return true
+end
+
+
+-- Handle straight-line mech-armor movement (extracted branch)
+---@param player_index integer
+---@param data PlayerMoveData
+---@param player LuaPlayer
+---@return boolean stop_movement, boolean changed_gui
+local function handle_straight_line_movement(player_index, data, player)
+  local character = player.character
+  local goal = data.goals[1]
+  local changed_gui = false
+
+  if not character or not goal or not is_wearing_mech(player) then
+    if character and goal and not is_wearing_mech(player) then
+      if DEBUG_MODE(player_index) then player.print("Click2Move: Mech-armor removed, switching to pathfinding.") end
+      data.is_straight_line_move = nil
+      changed_gui = start_path_request_for_player(player_index) -- Capture changed from path request
+    end
+    return true, changed_gui  -- Stop
+  end
+
+  local dist_sq_to_goal = distance_sq(character.position, goal)
+  local threshold_sq = config.proximity_threshold ^ 2
+
+  -- Stuck detection
+  if detect_stuck(data, character.position, data.last_position, "stuck_counter", config.stuck_threshold, 0.03) then
+    if DEBUG_MODE(player_index) then player.print("Click2Move: Mech movement stopped (stuck).") end
+    return true, changed_gui
+  end
+  data.last_position = { x = character.position.x, y = character.position.y }
+
+  if dist_sq_to_goal < threshold_sq then
+    return true, changed_gui  -- Arrived
+  end
+
+  -- Move
+  set_character_walking(character, data, goal)
+  return false, changed_gui  -- Continue
 end
 
 -- Handles the custom input to initiate movement
@@ -355,12 +459,7 @@ local function on_custom_input(event)
   if not event.cursor_position then return end
 
   -- Check if the click was on a different surface than the entity being controlled
-  -- This handles remote control of vehicles on other planets.
-  local target_surface =  entity_to_move.surface
-  if target_surface ~= entity_to_move.surface then
-    if DEBUG_MODE(player.index) then player.print("Click2Move: Cannot path to a different surface.") end
-    return
-  end
+  local changed = false
 
   local data = ensure_player_data(player.index)
   local goal = { x = event.cursor_position.x, y = event.cursor_position.y }
@@ -368,10 +467,12 @@ local function on_custom_input(event)
   -- If wearing mech armor, use straight-line movement and bypass pathfinding
   if is_wearing_mech(player) then
     data.goals = { goal }
+    changed = true
     data.is_straight_line_move = true -- Custom flag for our new mode
-    update_gui_for_player(player.index)
+    if changed then update_gui_for_player(player.index) end
     return
   end
+  changed = true
 
   if event.input_name == "c2m-move-command-queue" then
     -- queue this goal
@@ -397,10 +498,10 @@ local function on_custom_input(event)
   end
 
   -- Ensure GUI reflects queue state
-  update_gui_for_player(player.index)
   -- If not currently waiting for a path, immediately request one for first goal
-  
-  start_path_request_for_player(player.index)
+  local path_request_changed = start_path_request_for_player(player.index)
+  changed = changed or path_request_changed
+  if changed then update_gui_for_player(player.index) end
 end
 
 -- Handles path request finished
@@ -423,6 +524,7 @@ local function on_path_request_finished(event)
   end
 
   local data = player_move_data[matched_player_index]
+  local changed = false
   data.path_id = nil
 
   -- if path present and non-empty
@@ -435,6 +537,7 @@ local function on_path_request_finished(event)
     data.vehicle_stuck_counter = 0
     data.last_vehicle_position = nil
     data.retry_count = 0
+    changed = true
     data.retry_at = nil
 
     -- render polyline using player's color (characters only)
@@ -456,7 +559,6 @@ local function on_path_request_finished(event)
       else
         path_color.a = 0.9
       end
-      
 
       for i = 1, math.max(0, #points - 1) do
         local from = points[i]; local to = points[i+1]
@@ -489,10 +591,10 @@ local function on_path_request_finished(event)
     local crosshair_objs = draw_target_crosshair(player, data.goals[1], player.color)
     for _, o in ipairs(crosshair_objs) do table.insert(data.render_objs, o) end
 
-    update_gui_for_player(matched_player_index)
   else
     -- no path returned
     if event.try_again_later then
+      changed = true
       data.retry_count = (data.retry_count or 0) + 1
       if data.retry_count <= MAX_PATH_RETRIES then
         data.retry_at = game.tick + PATH_RETRY_DELAY_TICKS
@@ -507,22 +609,22 @@ local function on_path_request_finished(event)
         data.path_id = nil
         data.retry_at = nil
         data.retry_count = 0
-        update_gui_for_player(matched_player_index)
         -- start next if present
-        if data.goals[1] then start_path_request_for_player(matched_player_index) end
+        if data.goals[1] then changed = changed or start_path_request_for_player(matched_player_index) end
       end
     else
       -- permanent failure; notify and drop current goal
       player.print("Click2Move: No path found to " .. format_pos(data.goals[1]))
+      changed = true
       table.remove(data.goals, 1)
       safe_destroy_renderings(data.render_objs)
       data.render_objs = nil
       data.path = nil
       data.path_id = nil
-      update_gui_for_player(matched_player_index)
-      if data.goals[1] then start_path_request_for_player(matched_player_index) end
+      if data.goals[1] then changed = changed or start_path_request_for_player(matched_player_index) end
     end
   end
+  if changed then update_gui_for_player(matched_player_index) end
 end
 
 -- GUI click: cancel
@@ -534,277 +636,177 @@ local function on_gui_click(event)
   if not player or not player.valid then return end
 
   local data = player_move_data[player.index]
+  local changed = true
   if data then
     -- clear everything for this player
     safe_destroy_renderings(data.render_objs)
     player_move_data[player.index] = nil
   end
   -- destroy GUI (update will remove if anything left)
-  if player.gui.top[GUI_ROOT_NAME] and player.gui.top[GUI_ROOT_NAME].valid then
-    player.gui.top[GUI_ROOT_NAME].destroy()
-  end
   if DEBUG_MODE(player.index) then player.print("Click2Move: Auto-walk cancelled by player.") end
+  if changed then update_gui_for_player(player.index) end
 end
 
 -- Main per-interval update
----@param event EventData.on_tick
+-- Handle vehicle movement
+---@param player_index integer | string
+---@param data PlayerMoveData
+---@param player LuaPlayer
+---@param vehicle LuaEntity
+---@return boolean
+local function handle_vehicle_movement(player_index, data, player, vehicle)
+  local waypoint = data.path[data.current_waypoint]
+  if not waypoint or not waypoint.position then return true end  -- Invalid, stop
+
+  local waypoint_pos = waypoint.position
+
+  -- Stuck detection
+  if detect_stuck(data, vehicle.position, data.last_vehicle_position, "vehicle_stuck_counter", config.stuck_threshold, 0.1) then
+    if DEBUG_MODE(player_index) then player.print("Click2Move: Vehicle stuck; re-pathing.") end
+    data.retry_count = (data.retry_count or 0) + 1
+    if data.retry_count > MAX_PATH_RETRIES then
+      -- This will be handled by cleanup_and_next_goal
+      return true -- Signal to stop and cleanup
+    else
+      data.path = nil
+      data.path_id = nil
+      data.retry_at = game.tick + PATH_RETRY_DELAY_TICKS
+    end
+    return false  -- Don't move this tick, wait for retry
+  end
+  data.last_vehicle_position = { x = vehicle.position.x, y = vehicle.position.y }
+
+  -- Dynamic threshold
+  local speed = vehicle.speed or 0
+  local dynamic_threshold_sq = (2.0 + speed * 2.0) ^ 2  -- Squared
+  advance_waypoint(data, vehicle.position, waypoint_pos, dynamic_threshold_sq)
+
+  if data.current_waypoint > #data.path then
+    local goal_pos = data.goals[1]
+    if distance_sq(vehicle.position, goal_pos) < config.vehicle_proximity_threshold ^ 2 then
+      return true  -- Arrived
+    end
+  end
+
+  -- Move to current/next waypoint
+  local target_pos = waypoint_pos
+  if data.current_waypoint > #data.path then target_pos = data.goals[1] end
+  set_vehicle_riding(player, vehicle, target_pos)
+  return false  -- Continue
+end
+
+-- Handle character movement
+local function handle_character_movement(player_index, data, player, character)
+  if character.walking_state and character.walking_state.walking and not data.is_auto_walking then
+    if DEBUG_MODE(player_index) then player.print("Click2Move: Player manually moved, cancelling auto-walk.") end
+    return true  -- Stop
+  end
+
+  local waypoint = data.path[data.current_waypoint]
+  if not waypoint or not waypoint.position then return true end  -- Invalid, stop
+
+  -- Stuck detection
+  if detect_stuck(data, character.position, data.last_position, "stuck_counter", config.stuck_threshold, 0.03) then
+    if DEBUG_MODE(player_index) then player.print("Click2Move: Character stuck; re-pathing/drop goal.") end
+    data.retry_count = (data.retry_count or 0) + 1
+    if data.retry_count > MAX_PATH_RETRIES then
+      -- This will be handled by cleanup_and_next_goal
+      return true -- Signal to stop and cleanup
+    else
+      data.path = nil
+      data.path_id = nil
+      data.retry_at = game.tick + PATH_RETRY_DELAY_TICKS
+    end
+    return false
+  end
+  data.last_position = { x = character.position.x, y = character.position.y }
+
+  -- Dynamic threshold
+  local speed_per_tick = (player.character_running_speed or 0) / 60
+  local dynamic_threshold_sq = (config.proximity_threshold + speed_per_tick * 1.5) ^ 2
+  advance_waypoint(data, character.position, waypoint.position, dynamic_threshold_sq)
+
+  if data.current_waypoint > #data.path then
+    return true  -- Arrived
+  end
+
+  waypoint = data.path[data.current_waypoint]
+  if waypoint and waypoint.position then
+    set_character_walking(character, data, waypoint.position)
+  else
+    return true  -- Invalid waypoint
+  end
+
+  return false  -- Continue
+end
+
+-- Cleanup and advance to next goal
+local function cleanup_and_next_goal(player_index, data, player, entity_to_move, changed)
+  cleanup_movement(entity_to_move, player, data)
+  changed = true -- Cleanup always changes state relevant to GUI
+  if data.goals and #data.goals > 0 then
+    table.remove(data.goals, 1)
+  end
+  if data.goals and #data.goals > 0 then
+    local path_request_changed = start_path_request_for_player(player_index)
+    changed = changed or path_request_changed
+  else
+    player_move_data[player_index] = nil
+  end
+  return changed
+end
+
+-- Simplified on_tick
 local function on_tick(event)
   for player_index, data in pairs(player_move_data) do
     local player = game.players[player_index]
     if not player or not player.connected then
       safe_destroy_renderings(data.render_objs)
       player_move_data[player_index] = nil
-      goto continue
+      goto continue_player_loop
     end
 
     local stop_movement = false
     -- Declare these here to avoid goto jumping over their scope
     local entity_to_move = player.vehicle or player.character
-    local vehicle = player.vehicle
-
-    -- Handle straight-line movement for mech-armor
-    if data.is_straight_line_move then
-      local character = player.character
-      local goal = data.goals[1]
-
-      -- Stop if no character, no goal, or armor was removed
-      if not character or not goal or not is_wearing_mech(player) then
-        if character and goal and not is_wearing_mech(player) then
-          -- Armor removed, switch to normal pathfinding
-          if DEBUG_MODE(player_index) then player.print("Click2Move: Mech-armor removed, switching to pathfinding.") end
-          data.is_straight_line_move = nil
-          start_path_request_for_player(player_index)
-        else
-          stop_movement = true
-        end
-      else
-        local dist_to_goal = util_vector.distance(character.position, goal)
-
-        -- Stuck detection for straight-line movement
-        if data.last_position then
-          local moved = util_vector.distance(character.position, data.last_position)
-          if moved < 0.03 then data.stuck_counter = data.stuck_counter + 1 else data.stuck_counter = 0 end
-        end
-        data.last_position = { x = character.position.x, y = character.position.y }
-
-        -- Stop if arrived or stuck
-        if dist_to_goal < PROXIMITY_THRESHOLD() or data.stuck_counter > STUCK_THRESHOLD() then
-          if data.stuck_counter > STUCK_THRESHOLD() and DEBUG_MODE(player_index) then
-            player.print("Click2Move: Mech movement stopped (stuck).")
-          end
-          stop_movement = true
-        else
-          -- Set walking state to move towards the goal
-          local direction = get_character_direction(character.position, goal)
-          if direction then
-            data.is_auto_walking = true
-            character.walking_state = { walking = true, direction = direction }
-          else
-            -- This case happens when very close to the target, let the arrival check handle it
-            data.is_auto_walking = false
-            character.walking_state = { walking = false, direction = defines.direction.north }
-          end
-        end
-      end
-
-      if stop_movement then
-        -- Clean up and proceed to next goal if any
-        goto stop_and_cleanup
-      end
-
-      goto continue -- Skip pathfinding logic for this tick
-    end
-
-    -- If no path and not waiting, but have queued goals, ensure we request a path for first goal
-    if (not data.path) and (not data.path_id) and data.goals and #data.goals > 0 and (not data.retry_at) then
-      start_path_request_for_player(player_index)
-    end
-
-    -- If still waiting for path, skip movement
-    if not data.path then goto continue end
-
     if not entity_to_move then
-      stop_movement = true
+      player_move_data[player_index] = nil
+      goto continue_player_loop
+    end
 
-    elseif vehicle then
-      local waypoint = data.path[data.current_waypoint]
-      if not waypoint or not waypoint.position then
-        stop_movement = true
-        goto continue  -- Invalid waypoint; bail
-      end
+    local changed = false
+    local gui_update_from_handler = false
 
-      -- Stuck detection
-      if data.last_vehicle_position then
-        local moved = util_vector.distance(vehicle.position, data.last_vehicle_position)
-        if moved < 0.1 then
-          data.vehicle_stuck_counter = data.vehicle_stuck_counter + 1
-        else
-          data.vehicle_stuck_counter = 0
-        end
-      end
-      data.last_vehicle_position = { x = vehicle.position.x, y = vehicle.position.y }
-
-      if data.vehicle_stuck_counter > STUCK_THRESHOLD() then
-        if DEBUG_MODE(player_index) then player.print("Click2Move: Vehicle stuck; re-pathing.") end
-        data.retry_count = (data.retry_count or 0) + 1
-        if data.retry_count <= MAX_PATH_RETRIES then
-          data.path = nil
-          data.path_id = nil
-          data.retry_at = game.tick + PATH_RETRY_DELAY_TICKS
-        else
-          -- Drop goal and try next
-          table.remove(data.goals, 1)
-          safe_destroy_renderings(data.render_objs)
-          data.render_objs = nil
-          data.path = nil
-          data.path_id = nil
-          data.retry_count = 0
-          update_gui_for_player(player_index)
-          if data.goals[1] then start_path_request_for_player(player_index) end
-        end
-        goto continue
-      end
-
-      local waypoint_pos = waypoint.position
-      local dist_to_waypoint = util_vector.distance(vehicle.position, waypoint_pos)
-
-      -- Dynamic waypoint threshold based on vehicle speed
-      local speed_tiles_per_tick = vehicle.speed or 0 -- vehicle.speed is in tiles/tick
-      local safety_factor = 2.0 -- A bit higher for vehicles
-      local dynamic_waypoint_threshold = 2.0 + (speed_tiles_per_tick * safety_factor)
-
-      if dist_to_waypoint < dynamic_waypoint_threshold then
-        data.current_waypoint = data.current_waypoint + 1
-      end
-
-      if data.current_waypoint > #data.path then
-        -- Reached the last waypoint, now check against final goal proximity
-        local goal_pos = data.goals[1]
-        local dist_goal = util_vector.distance(vehicle.position, goal_pos)
-        if dist_goal < VEHICLE_PROXIMITY_THRESHOLD() then
-          stop_movement = true
-        end
-      end
-
-      player.riding_state = get_vehicle_riding_state(vehicle, data.path[data.current_waypoint] and data.path[data.current_waypoint].position or data.goals[1])
+    -- Mech-armor straight-line
+    if data.is_straight_line_move then
+      stop_movement, gui_update_from_handler = handle_straight_line_movement(player_index, data, player)
+      changed = changed or gui_update_from_handler
     else
-      -- character handling
-      local character = player.character
-      if not character then stop_movement = true
+      -- Ensure path if needed
+      if not data.path and not data.path_id and data.goals and #data.goals > 0 and not data.retry_at then
+        local path_request_changed = start_path_request_for_player(player_index)
+        changed = changed or path_request_changed
+      end
+
+      if not data.path then goto continue_player_loop end  -- Waiting; skip
+
+      if player.vehicle then
+        stop_movement = handle_vehicle_movement(player_index, data, player, player.vehicle)
       else
-        if character.walking_state and character.walking_state.walking and not data.is_auto_walking then
-          if DEBUG_MODE(player_index) then player.print("Click2Move: Player manually moved, cancelling auto-walk.") end
-          stop_movement = true
-        else
-          local waypoint = data.path[data.current_waypoint]
-          -- stuck detection
-          if data.last_position then
-            local moved = util_vector.distance(character.position, data.last_position)
-            if moved < 0.03 then data.stuck_counter = data.stuck_counter + 1 else data.stuck_counter = 0 end
-          end
-          data.last_position = { x = character.position.x, y = character.position.y }
-
-          if data.stuck_counter > STUCK_THRESHOLD() then
-            if DEBUG_MODE(player_index) then player.print("Click2Move: Character stuck; re-pathing/drop goal.") end
-            data.retry_count = (data.retry_count or 0) + 1
-            if data.retry_count <= MAX_PATH_RETRIES then
-              data.path = nil
-              data.path_id = nil
-              data.retry_at = game.tick + PATH_RETRY_DELAY_TICKS
-            else
-              -- drop this goal and move to next
-              table.remove(data.goals, 1)
-              safe_destroy_renderings(data.render_objs)
-              data.render_objs = nil
-              data.path = nil
-              data.path_id = nil
-              data.retry_count = 0
-              update_gui_for_player(player_index)
-              if data.goals[1] then start_path_request_for_player(player_index) end
-            end
-            goto continue
-          end
-
-          if waypoint and waypoint.position then
-            local dist_to_waypoint = util_vector.distance(character.position, waypoint.position)
-
-            -- Dynamic proximity threshold based on character speed
-            local speed_tiles_per_second = player.character_running_speed or 0
-            local speed_tiles_per_tick = speed_tiles_per_second / 60
-            local safety_factor = 1.5 -- Can be tuned
-            local dynamic_threshold = PROXIMITY_THRESHOLD() + (speed_tiles_per_tick * safety_factor)
-            if dist_to_waypoint < dynamic_threshold then
-              data.current_waypoint = data.current_waypoint + 1
-            end
-
-            if data.current_waypoint > #data.path then
-              stop_movement = true
-            else
-              waypoint = data.path[data.current_waypoint]
-              if waypoint and waypoint.position then
-                local direction = get_character_direction(character.position, waypoint.position)
-                if direction then
-                  data.is_auto_walking = true
-                  character.walking_state = { walking = true, direction = direction }
-                else
-                  data.is_auto_walking = false
-                  character.walking_state = { walking = false, direction = defines.direction.north }
-                end
-              else
-                stop_movement = true
-              end
-            end
-          else
-            stop_movement = true
-          end
-        end
+        stop_movement = handle_character_movement(player_index, data, player, player.character)
       end
     end
 
-    ::stop_and_cleanup::
-
+    -- If movement stopped (arrived, stuck, manual override, or invalid state)
     if stop_movement then
-      -- arrived or cancelled for this path/goal
-      if entity_to_move and entity_to_move.valid then
-        if entity_to_move.type == "character" then
-          entity_to_move.walking_state = { walking = false, direction = defines.direction.north }
-        elseif vehicle and player.valid then
-          player.riding_state = { direction = defines.riding.direction.straight, acceleration = defines.riding.acceleration.braking }
-        end
-      end
-
-      -- cleanup render objects for this goal
-      safe_destroy_renderings(data.render_objs)
-      data.render_objs = nil
-      data.path = nil
-      data.path_id = nil
-      data.current_waypoint = 1
-      data.is_auto_walking = false
-      data.stuck_counter = 0
-      data.last_position = nil
-      data.vehicle_stuck_counter = 0
-      data.last_vehicle_position = nil
-      data.retry_count = 0
-      data.retry_at = nil
-      data.is_straight_line_move = nil
-
-      -- remove completed goal from queue (it was goals[1])
-      if data.goals and #data.goals > 0 then
-        table.remove(data.goals, 1)
-      end
-
-      -- if next goal exists, start path request
-      if data.goals and #data.goals > 0 then
-        update_gui_for_player(player_index)
-        start_path_request_for_player(player_index)
-      else
-        -- no more goals -> cleanup data and GUI
-        update_gui_for_player(player_index)
-        player_move_data[player_index] = nil
-      end
+      changed = cleanup_and_next_goal(player_index, data, player, entity_to_move, changed)
     end
 
-    ::continue::
+    if changed then
+      update_gui_for_player(player_index)
+    end
+
+    ::continue_player_loop::
   end
 end
 
@@ -816,8 +818,8 @@ local function initialize()
   script.on_event(defines.events.on_script_path_request_finished, on_path_request_finished)
   script.on_event(defines.events.on_gui_click, on_gui_click)
 
-  local interval = UPDATE_INTERVAL() or 1
-  script.on_nth_tick(interval, on_tick)
+  load_config()
+  script.on_nth_tick(config.update_interval, on_tick)
 
   player_move_data = {}
 end
@@ -825,11 +827,12 @@ end
 script.on_init(initialize)
 script.on_configuration_changed(initialize)
 script.on_load(function()
+  load_config()
   -- re-register handlers on load
   script.on_event("c2m-move-command", on_custom_input)
   script.on_event("c2m-move-command-queue", on_custom_input)
   script.on_event("bazinga", function(_event) game.print("bazinga!") end)
   script.on_event(defines.events.on_script_path_request_finished, on_path_request_finished)
   script.on_event(defines.events.on_gui_click, on_gui_click)
-  script.on_nth_tick(UPDATE_INTERVAL() or 1, on_tick)
+  script.on_nth_tick(config.update_interval, on_tick)
 end)
