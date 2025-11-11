@@ -17,6 +17,10 @@ local function format_pos(pos)
 end
 
 -- Draws a crosshair at a given position for a player. color optional (defaults to green)
+---@param player LuaPlayer
+---@param position MapPosition
+---@param color Color
+---@return LuaRenderObject[]
 local function draw_target_crosshair(player, position, color)
   local size = 0.5
   local default_color = {r = 0.1, g = 0.8, b = 0.1, a = 0.9}
@@ -26,6 +30,7 @@ local function draw_target_crosshair(player, position, color)
   local players = {player}
   local time_to_live = 600 -- 10 seconds
 
+  ---@type LuaRenderObject[]
   local objs = {}
   table.insert(objs, rendering.draw_line{
     color = col,
@@ -49,6 +54,9 @@ local function draw_target_crosshair(player, position, color)
 end
 
 -- 8-way direction selection (returns defines.direction)
+---@param from MapPosition
+---@param to MapPosition
+---@return defines.direction | nil
 local function get_character_direction(from, to)
   local distance_threshold = 0.15
   local dx = to.x - from.x
@@ -87,6 +95,7 @@ local function get_vehicle_riding_state(vehicle, target_pos)
   local steer_threshold = 0.2
   local accel_threshold = 0.2
 
+  ---@type defines.riding.direction
   local direction = defines.riding.direction.straight
   if right < -steer_threshold then
     direction = defines.riding.direction.left
@@ -94,6 +103,7 @@ local function get_vehicle_riding_state(vehicle, target_pos)
     direction = defines.riding.direction.right
   end
 
+  ---@type defines.riding.acceleration
   local acceleration = defines.riding.acceleration.braking
   if forward > accel_threshold then
     acceleration = defines.riding.acceleration.accelerating
@@ -106,61 +116,47 @@ local function get_vehicle_riding_state(vehicle, target_pos)
   return {direction = direction, acceleration = acceleration}
 end
 
--- Build path request parameters
-local function create_path_request_params(player, goal)
-  local entity_to_move = player.vehicle or player.character
-  if not entity_to_move then return nil end
-
-  local start_pos = entity_to_move.position
-
-  local bounding_box = entity_to_move.prototype and entity_to_move.prototype.collision_box or {{-0.2,-0.2},{0.2,0.2}}
-  local margin = (not player.vehicle) and (settings.global["c2m-character-margin"].value) or (settings.startup["c2m-vehicle-path-margin"].value)
-  if bounding_box.left_top and bounding_box.right_bottom then
-    bounding_box = {
-      left_top = { x = bounding_box.left_top.x - margin, y = bounding_box.left_top.y - margin },
-      right_bottom = { x = bounding_box.right_bottom.x + margin, y = bounding_box.right_bottom.y + margin }
-    }
-  else
-    bounding_box = {
-      left_top = { x = -margin, y = -margin },
-      right_bottom = { x = margin, y = margin }
-    }
-  end
-
-  local collision_mask = (entity_to_move.prototype and entity_to_move.prototype.collision_mask) and entity_to_move.prototype.collision_mask or {}
-
-  return {
-    bounding_box = bounding_box,
-    collision_mask = collision_mask,
-    start = start_pos,
-    goal = goal,
-    pathfind_flags = { allow_destroy_friendly_entities = (not player.vehicle), cache = (player.vehicle ~= nil) },
-    force = player.force.name,
-    entity_to_ignore = entity_to_move
-  }
-end
-
 -- Config getters
+local function CHARACTER_MARGIN()
+  local res = settings.global["c2m-character-margin"].value
+  if type(res) == "number" then return res end
+  return 0.5
+end
 local function PROXIMITY_THRESHOLD()
-  return settings.startup["c2m-character-proximity-threshold"] and settings.startup["c2m-character-proximity-threshold"].value or 1.5
+  local res = settings.startup["c2m-character-proximity-threshold"].value
+  if type(res) == "number" then return res end
+  return 1.5
 end
 local function UPDATE_INTERVAL()
-  return settings.startup["c2m-update-interval"] and settings.startup["c2m-update-interval"].value or 1
+  local res = settings.startup["c2m-update-interval"].value
+  if type(res) == "number" then return res end
+  return 1
 end
 local function VEHICLE_PROXIMITY_THRESHOLD()
-  return settings.startup["c2m-vehicle-proximity-threshold"] and settings.startup["c2m-vehicle-proximity-threshold"].value or 6.0
+  local res = settings.startup["c2m-vehicle-proximity-threshold"].value
+  if type(res) == "number" then return res end
+  return 6.0
 end
 local function STUCK_THRESHOLD()
-  return settings.startup["c2m-stuck-threshold"] and settings.startup["c2m-stuck-threshold"].value or 30
+  local res = settings.startup["c2m-stuck-threshold"].value
+  if type(res) == "number" then return res end
+  return 30
 end
 local function VEHICLE_PATH_MARGIN()
-  return settings.startup["c2m-vehicle-path-margin"] and settings.startup["c2m-vehicle-path-margin"].value or 1.0
+  local res = settings.startup["c2m-vehicle-path-margin"].value
+  if type(res) == "number" then return res end
+  return 1.0
 end
+
+---@param player_index integer|string
+---@return boolean
 local function DEBUG_MODE(player_index)
   local p = game.players[player_index]
   if not p then return false end
-  local s = settings.get_player_settings(p)
-  return s and s["c2m-debug-mode"] and s["c2m-debug-mode"].value
+  local setts = settings.get_player_settings(p)
+  local res = setts["c2m-debug-mode"].value
+  if type(res) == "boolean" then return res end
+  return false
 end
 
 -- Check if the player is wearing "mech-armor"
@@ -171,7 +167,23 @@ local function is_wearing_mech(player)
   return armor_inv[1].name == "mech-armor"
 end
 
+---@class PlayerMoveData
+---@field path_id? uint32
+---@field path? PathfinderWaypoint[]
+---@field current_waypoint uint32
+---@field retry_count uint32
+---@field retry_at? uint32
+---@field render_objs? LuaRenderObject[]
+---@field last_position? MapPosition
+---@field stuck_counter uint32
+---@field is_auto_walking boolean
+---@field goals MapPosition[]
+---@field vehicle_stuck_counter uint32
+---@field last_vehicle_position? MapPosition
+---@field is_straight_line_move? boolean
+
 -- Persistent-in-session table (cleared on init/config change)
+---@type table<uint32, PlayerMoveData>
 local player_move_data = {}
 
 -- Retry constants
@@ -199,6 +211,49 @@ local function ensure_player_data(player_index)
     player_move_data[player_index] = d
   end
   return d
+end
+
+-- Build path request parameters
+---@param player LuaPlayer
+---@param goal MapPosition
+---@return nil
+local function create_path_request_params(player, goal)
+  local entity_to_move = player.vehicle or player.character
+  if not entity_to_move then return nil end
+
+  local start_pos = entity_to_move.position
+  local bounding_box = entity_to_move.prototype and entity_to_move.prototype.collision_box or {{-0.2,-0.2},{0.2,0.2}}
+  ---@type number
+  local margin = 0
+  if player.vehicle then
+    margin = VEHICLE_PATH_MARGIN()
+  else
+    margin = CHARACTER_MARGIN()
+  end
+
+  if bounding_box.left_top and bounding_box.right_bottom then
+    bounding_box = {
+      left_top = { x = bounding_box.left_top.x - margin, y = bounding_box.left_top.y - margin },
+      right_bottom = { x = bounding_box.right_bottom.x + margin, y = bounding_box.right_bottom.y + margin }
+    }
+  else
+    bounding_box = {
+      left_top = { x = -margin, y = -margin },
+      right_bottom = { x = margin, y = margin }
+    }
+  end
+
+  local collision_mask = (entity_to_move.prototype and entity_to_move.prototype.collision_mask) and entity_to_move.prototype.collision_mask or {}
+
+  return {
+    bounding_box = bounding_box,
+    collision_mask = collision_mask,
+    start = start_pos,
+    goal = goal,
+    pathfind_flags = { allow_destroy_friendly_entities = (not player.vehicle), cache = (player.vehicle ~= nil) },
+    force = player.force.name,
+    entity_to_ignore = entity_to_move
+  }
 end
 
 -- GUI utilities
@@ -249,16 +304,18 @@ local function update_gui_for_player(player_index)
 end
 
 -- Safe destroy of rendering Lua objects (they are LuaRenderObject instances)
+---@param render_objs LuaRenderObject[]
 local function safe_destroy_renderings(render_objs)
   if not render_objs then return end
-  for _, robj in ipairs(render_objs) do
-    if robj and robj.valid then
-      robj:destroy()
+  for _, render_obj in ipairs(render_objs) do
+    if render_obj and render_obj.valid then
+      render_obj:destroy()
     end
   end
 end
 
 -- Start a path request for the player's current first goal (if any)
+---@param player_index integer | string
 local function start_path_request_for_player(player_index)
   local player = game.players[player_index]
   if not player or not player.valid or not player.connected then return end
@@ -289,6 +346,7 @@ local function start_path_request_for_player(player_index)
 end
 
 -- Handles the custom input to initiate movement
+---@param event EventData.CustomInputEvent
 local function on_custom_input(event)
   if event.input_name ~= "c2m-move-command" and event.input_name ~= "c2m-move-command-queue" then return end
   local player = game.players[event.player_index]
@@ -298,7 +356,7 @@ local function on_custom_input(event)
 
   -- Check if the click was on a different surface than the entity being controlled
   -- This handles remote control of vehicles on other planets.
-  local target_surface = event.cursor_position.surface or entity_to_move.surface
+  local target_surface =  entity_to_move.surface
   if target_surface ~= entity_to_move.surface then
     if DEBUG_MODE(player.index) then player.print("Click2Move: Cannot path to a different surface.") end
     return
@@ -346,6 +404,7 @@ local function on_custom_input(event)
 end
 
 -- Handles path request finished
+---@param event EventData.on_script_path_request_finished
 local function on_path_request_finished(event)
   -- find matching player
   local matched_player_index = nil
@@ -488,6 +547,7 @@ local function on_gui_click(event)
 end
 
 -- Main per-interval update
+---@param event EventData.on_tick
 local function on_tick(event)
   for player_index, data in pairs(player_move_data) do
     local player = game.players[player_index]
