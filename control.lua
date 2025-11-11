@@ -76,6 +76,9 @@ local function get_character_direction(from, to)
 end
 
 -- Vehicle riding state towards a target
+---@param vehicle LuaEntity
+---@param target_pos MapPosition
+---@return defines.riding
 local function get_vehicle_riding_state(vehicle, target_pos)
   -- Factorio orientation: 0 is North, clockwise. Math functions: 0 is East, counter-clockwise.
   -- We need to adjust the angle. A 90-degree (pi/2) clockwise rotation is needed.
@@ -132,6 +135,11 @@ local function distance_sq(a, b)
 end
 
 -- Advance to next waypoint if close enough (shared for char/vehicle)
+---@param data PlayerMoveData
+---@param current_pos MapPosition
+---@param waypoint_pos MapPosition
+---@param threshold_sq number
+---@return boolean
 local function advance_waypoint(data, current_pos, waypoint_pos, threshold_sq)
   if distance_sq(current_pos, waypoint_pos) < threshold_sq then
     data.current_waypoint = data.current_waypoint + 1
@@ -141,6 +149,13 @@ local function advance_waypoint(data, current_pos, waypoint_pos, threshold_sq)
 end
 
 -- Detect stuck (shared, returns true if stuck)
+---@param data PlayerMoveData
+---@param current_pos MapPosition
+---@param last_pos MapPosition
+---@param counter_field "stuck_counter" | "vehicle_stuck_counter
+---@param threshold number
+---@param min_move number
+---@return boolean
 local function detect_stuck(data, current_pos, last_pos, counter_field, threshold, min_move)
   if not last_pos then return false end
   local moved_sq = distance_sq(current_pos, last_pos)
@@ -171,6 +186,9 @@ local function set_vehicle_riding(player, vehicle, target_pos)
 end
 
 -- Cleanup movement state (shared)
+---@param entity_to_move LuaEntity
+---@param player LuaPlayer
+---@param data PlayerMoveData
 local function cleanup_movement(entity_to_move, player, data)
   if entity_to_move and entity_to_move.valid then
     if entity_to_move.type == "character" then
@@ -215,12 +233,14 @@ local config = {
 }
 
 local function load_config()
+  ---@diagnostic disable: assign-type-mismatch
   config.character_margin = settings.global["c2m-character-margin"].value or 0.5
   config.proximity_threshold = settings.startup["c2m-character-proximity-threshold"].value or 1.5
   config.update_interval = settings.startup["c2m-update-interval"].value or 1
   config.vehicle_proximity_threshold = settings.startup["c2m-vehicle-proximity-threshold"].value or 6.0
   config.stuck_threshold = settings.startup["c2m-stuck-threshold"].value or 30
   config.vehicle_path_margin = settings.startup["c2m-vehicle-path-margin"].value or 1.0
+  ---@diagnostic enable: assign-type-mismatch
 end
 
 ---@param player_index integer|string
@@ -232,6 +252,8 @@ local function DEBUG_MODE(player_index)
 end
 
 -- Check if the player is wearing "mech-armor"
+---@param player LuaPlayer
+---@return boolean
 local function is_wearing_mech(player)
   if not player or not player.character or not player.character.get_inventory then return false end
   local armor_inv = player.character.get_inventory(defines.inventory.character_armor).get_contents()
@@ -678,7 +700,7 @@ local function handle_vehicle_movement(player_index, data, player, vehicle)
 
   -- Dynamic threshold
   local speed = vehicle.speed or 0
-  local dynamic_threshold_sq = (2.0 + speed * 2.0) ^ 2  -- Squared
+  local dynamic_threshold_sq = (4.0 + speed * 2.0) ^ 2  -- Squared
   advance_waypoint(data, vehicle.position, waypoint_pos, dynamic_threshold_sq)
 
   if data.current_waypoint > #data.path then
@@ -696,6 +718,11 @@ local function handle_vehicle_movement(player_index, data, player, vehicle)
 end
 
 -- Handle character movement
+---@param player_index integer | string
+---@param data PlayerMoveData
+---@param player LuaPlayer
+---@param character LuaEntity
+---@return boolean
 local function handle_character_movement(player_index, data, player, character)
   if character.walking_state and character.walking_state.walking and not data.is_auto_walking then
     if DEBUG_MODE(player_index) then player.print("Click2Move: Player manually moved, cancelling auto-walk.") end
@@ -722,7 +749,7 @@ local function handle_character_movement(player_index, data, player, character)
   data.last_position = { x = character.position.x, y = character.position.y }
 
   -- Dynamic threshold
-  local speed_per_tick = (player.character_running_speed or 0) / 60
+  local speed_per_tick = character.character_running_speed or 0
   local dynamic_threshold_sq = (config.proximity_threshold + speed_per_tick * 1.5) ^ 2
   advance_waypoint(data, character.position, waypoint.position, dynamic_threshold_sq)
 
