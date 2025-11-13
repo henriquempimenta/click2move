@@ -27,7 +27,7 @@ The default keybind can be changed in Factorio's control settings. Look for "**c
 ## Known Issues
 
 *   **Flickering with Mech Armor**: When moving horizontally with mech armor, the character sprite may flicker.
-*   **GUI Command Confusion**: The mod's move command can sometimes be triggered when interacting with other GUIs, leading to unintentional movement.
+*   ~~**GUI Command Confusion**: The mod's move command can sometimes be triggered when interacting with other GUIs, leading to unintentional movement~~.
 *   **Uncontrolled Vehicle Movement**: Vehicles may occasionally move erratically. This is likely due to a narrow margin of error in the path following logic.
 *   **Basic Stuck Detection**: The current stuck detection is rudimentary and cannot navigate around obstacles that were not already avoided by the initial pathfinding.
 *   **Vehicle Continues in Map View**: The vehicle does not automatically stop when the player opens the map view, which can lead to the vehicle driving off-course while the player is not watching.

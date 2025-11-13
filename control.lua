@@ -486,6 +486,9 @@ local function on_custom_input(event)
   if not entity_to_move or not player.connected then return end
   if not event.cursor_position then return end
 
+  -- Prevents the mod to be triggered when interacting with other GUIs, leading to unintentional movement.
+  if player.opened_gui_type ~= defines.gui_type.none then return end
+
   -- Check if the click was on a different surface than the entity being controlled
   local changed = false
 
