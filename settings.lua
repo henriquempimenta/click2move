@@ -55,7 +55,7 @@ data:extend({
     type = "double-setting",
     name = "c2m-vehicle-path-margin",
     setting_type = "startup",
-    default_value = 1.0,
+    default_value = 2.0,
     minimum_value = 0.0,
     maximum_value = 5.0,
     order = "g"

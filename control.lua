@@ -78,7 +78,7 @@ end
 -- Vehicle riding state towards a target
 ---@param vehicle LuaEntity
 ---@param target_pos MapPosition
----@return defines.riding
+---@return RidingState
 local function get_vehicle_riding_state(vehicle, target_pos)
   -- Factorio orientation: 0 is North, clockwise. Math functions: 0 is East, counter-clockwise.
   -- We need to adjust the angle. A 90-degree (pi/2) clockwise rotation is needed.
@@ -180,9 +180,12 @@ local function set_character_walking(character, data, waypoint_pos)
 end
 
 -- Set vehicle riding state
+---@param player LuaPlayer
+---@param vehicle LuaEntity
+---@param target_pos MapPosition
 local function set_vehicle_riding(player, vehicle, target_pos)
   local riding = get_vehicle_riding_state(vehicle, target_pos)
-  player.riding_state = riding
+  vehicle.riding_state = riding
 end
 
 -- Cleanup movement state (shared)
@@ -194,7 +197,7 @@ local function cleanup_movement(entity_to_move, player, data)
     if entity_to_move.type == "character" then
       entity_to_move.walking_state = { walking = false, direction = defines.direction.north }
     elseif player.vehicle then
-      player.riding_state = { direction = defines.riding.direction.straight, acceleration = defines.riding.acceleration.braking }
+      entity_to_move.riding_state = { direction = defines.riding.direction.straight, acceleration = defines.riding.acceleration.braking }
     end
   end
   safe_destroy_renderings(data.render_objs)
@@ -229,7 +232,7 @@ local config = {
   update_interval = 1,
   vehicle_proximity_threshold = 6.0,
   stuck_threshold = 30,
-  vehicle_path_margin = 1.0
+  vehicle_path_margin = 2.0
 }
 
 local function load_config()
@@ -239,7 +242,7 @@ local function load_config()
   config.update_interval = settings.startup["c2m-update-interval"].value or 1
   config.vehicle_proximity_threshold = settings.startup["c2m-vehicle-proximity-threshold"].value or 6.0
   config.stuck_threshold = settings.startup["c2m-stuck-threshold"].value or 30
-  config.vehicle_path_margin = settings.startup["c2m-vehicle-path-margin"].value or 1.0
+  config.vehicle_path_margin = settings.startup["c2m-vehicle-path-margin"].value or 2.0
   ---@diagnostic enable: assign-type-mismatch
 end
 
@@ -310,7 +313,7 @@ end
 -- Build path request parameters
 ---@param player LuaPlayer
 ---@param goal MapPosition
----@return nil
+---@return LuaSurface.request_path_param | nil
 local function create_path_request_params(player, goal)
   local entity_to_move = player.vehicle or player.character
   if not entity_to_move then return nil end
@@ -319,7 +322,7 @@ local function create_path_request_params(player, goal)
   local bounding_box = entity_to_move.prototype and entity_to_move.prototype.collision_box or {{-0.2,-0.2},{0.2,0.2}}
   ---@type number
   local margin = 0
-  if player.vehicle then
+  if player.character.vehicle then
     margin = config.vehicle_path_margin
   else
     margin = config.character_margin
@@ -344,7 +347,10 @@ local function create_path_request_params(player, goal)
     collision_mask = collision_mask,
     start = start_pos,
     goal = goal,
-    pathfind_flags = { allow_destroy_friendly_entities = (not player.vehicle), cache = (player.vehicle ~= nil) },
+    pathfind_flags = {
+      allow_destroy_friendly_entities = (not player.vehicle),
+      cache = (player.vehicle ~= nil),
+    },
     force = player.force.name,
     entity_to_ignore = entity_to_move
   }
@@ -700,12 +706,12 @@ local function handle_vehicle_movement(player_index, data, player, vehicle)
 
   -- Dynamic threshold
   local speed = vehicle.speed or 0
-  local dynamic_threshold_sq = (4.0 + speed * 2.0) ^ 2  -- Squared
+  local dynamic_threshold_sq = (config.vehicle_proximity_threshold + speed * 2.0) ^ 2  -- Squared
   advance_waypoint(data, vehicle.position, waypoint_pos, dynamic_threshold_sq)
 
   if data.current_waypoint > #data.path then
     local goal_pos = data.goals[1]
-    if distance_sq(vehicle.position, goal_pos) < config.vehicle_proximity_threshold ^ 2 then
+    if distance_sq(vehicle.position, goal_pos) < dynamic_threshold_sq then
       return true  -- Arrived
     end
   end
@@ -768,6 +774,12 @@ local function handle_character_movement(player_index, data, player, character)
 end
 
 -- Cleanup and advance to next goal
+---@param player_index integer | string
+---@param data PlayerMoveData
+---@param player LuaPlayer
+---@param entity_to_move LuaEntity
+---@param changed boolean
+---@return boolean
 local function cleanup_and_next_goal(player_index, data, player, entity_to_move, changed)
   cleanup_movement(entity_to_move, player, data)
   changed = true -- Cleanup always changes state relevant to GUI
@@ -817,8 +829,9 @@ local function on_tick(event)
 
       if not data.path then goto continue_player_loop end  -- Waiting; skip
 
-      if player.vehicle then
-        stop_movement = handle_vehicle_movement(player_index, data, player, player.vehicle)
+      local vehicle = player.vehicle or player.character.vehicle
+      if vehicle then
+        stop_movement = handle_vehicle_movement(player_index, data, player, vehicle)
       else
         stop_movement = handle_character_movement(player_index, data, player, player.character)
       end
@@ -841,7 +854,6 @@ end
 local function initialize()
   script.on_event("c2m-move-command", on_custom_input)
   script.on_event("c2m-move-command-queue", on_custom_input)
-  script.on_event("bazinga", function(_event) game.print("bazinga!") end)
   script.on_event(defines.events.on_script_path_request_finished, on_path_request_finished)
   script.on_event(defines.events.on_gui_click, on_gui_click)
 
@@ -858,7 +870,6 @@ script.on_load(function()
   -- re-register handlers on load
   script.on_event("c2m-move-command", on_custom_input)
   script.on_event("c2m-move-command-queue", on_custom_input)
-  script.on_event("bazinga", function(_event) game.print("bazinga!") end)
   script.on_event(defines.events.on_script_path_request_finished, on_path_request_finished)
   script.on_event(defines.events.on_gui_click, on_gui_click)
   script.on_nth_tick(config.update_interval, on_tick)
