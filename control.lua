@@ -351,7 +351,6 @@ local function create_path_request_params(player, goal)
   end
 
   local collision_mask = (entity_to_move.prototype and entity_to_move.prototype.collision_mask) and entity_to_move.prototype.collision_mask or {}
-  game.print(tableToString(collision_mask))
   return {
     bounding_box = bounding_box,
     collision_mask = collision_mask,
