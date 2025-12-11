@@ -254,14 +254,25 @@ local function DEBUG_MODE(player_index)
   return settings.get_player_settings(p)["c2m-debug-mode"].value ~= false  -- Simplified check
 end
 
--- Check if the player is wearing "mech-armor"
+-- Check if the player is wearing "mech-armor" or jetpack flying armor
 ---@param player LuaPlayer
 ---@return boolean
-local function is_wearing_mech(player)
-  if not player or not player.character or not player.character.get_inventory then return false end
-  local armor_inv = player.character.get_inventory(defines.inventory.character_armor).get_contents()
-  if not armor_inv or #armor_inv == 0 then return false end
-  return armor_inv[1].name == "mech-armor"
+local function is_flying(player)
+  if not player or not player.character then return false end
+  
+  local armor_inv = player.character.get_inventory(defines.inventory.character_armor)
+  if not (armor_inv and armor_inv[1] and armor_inv[1].valid_for_read) then return false end
+  
+  -- Check for mech-armor
+  if armor_inv[1].name == "mech-armor" then return true end
+  
+  -- Check if Jetpack mod is loaded and player is jetpacking
+  if script.active_mods["jetpack"] then
+    local is_jetpacking = remote.call("jetpack", "is_jetpacking", {character = player.character})
+    if is_jetpacking then return true end
+  end
+  
+  return false
 end
 
 ---@class PlayerMoveData
@@ -458,8 +469,8 @@ local function handle_straight_line_movement(player_index, data, player)
   local goal = data.goals[1]
   local changed_gui = false
 
-  if not character or not goal or not is_wearing_mech(player) then
-    if character and goal and not is_wearing_mech(player) then
+  if not character or not goal or not is_flying(player) then
+    if character and goal and not is_flying(player) then
       if DEBUG_MODE(player_index) then player.print("Click2Move: Mech-armor removed, switching to pathfinding.") end
       data.is_straight_line_move = nil
       changed_gui = start_path_request_for_player(player_index) -- Capture changed from path request
@@ -505,7 +516,7 @@ local function on_custom_input(event)
   local goal = { x = event.cursor_position.x, y = event.cursor_position.y }
 
   -- If wearing mech armor, use straight-line movement and bypass pathfinding
-  if is_wearing_mech(player) and not (player.vehicle or player.character.vehicle) then
+  if is_flying(player) and not (player.vehicle or player.character.vehicle) then
     data.goals = { goal }
     changed = true
     data.is_straight_line_move = true -- Custom flag for our new mode
