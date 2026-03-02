@@ -1,6 +1,6 @@
 {
   "name": "click2move",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "title": "Click to Move",
   "author": "Henrique",
   "contact": "https://github.com/henriquempimenta/click2move",
@@ -10,5 +10,7 @@
     "base >= 2.0"
   ],
   "description": "Allows players to middle click to move their character to a destination.",
-  "package": {"git_publish_branch": "master"}
+  "package": {
+    "git_publish_branch": "master"
+  }
 }

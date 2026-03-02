@@ -255,6 +255,7 @@ local function cleanup_movement(entity_to_move, player, data)
   data.no_progress_ticks = 0
   data.stuck_state = "none"
   data.stuck_timer = 0
+  data.slide_direction = nil
   data.is_straight_line_move = nil
 end
 
@@ -291,8 +292,9 @@ end
 ---@field last_vehicle_position? MapPosition
 ---@field closest_dist_to_goal number   -- Best progress made so far
 ---@field no_progress_ticks uint32      -- How long we haven't improved our distance
----@field stuck_state string            -- "none", "reversing", "repathing"
+---@field stuck_state string            -- "none", "reversing", "repathing", "sliding"
 ---@field stuck_timer uint32            -- Timer for the reverse maneuver
+---@field slide_direction? defines.direction
 ---@field is_straight_line_move? boolean
 
 -- Persistent-in-session table (cleared on init/config change)
@@ -323,7 +325,8 @@ local function ensure_player_data(player_index)
       closest_dist_to_goal = 999999, -- NEW
       no_progress_ticks = 0,         -- NEW
       stuck_state = "none",          -- NEW
-      stuck_timer = 0                -- NEW
+      stuck_timer = 0,               -- NEW
+      slide_direction = nil
     }
     player_move_data[player_index] = d
   end
@@ -565,6 +568,7 @@ local function on_custom_input(event)
     data.no_progress_ticks = 0
     data.stuck_state = "none"
     data.stuck_timer = 0
+    data.slide_direction = nil
 
     if DEBUG_MODE(player.index) then player.print("Click2Move: Set new goal: " .. format_pos(goal)) end
   end
@@ -617,6 +621,7 @@ local function on_path_request_finished(event)
     data.no_progress_ticks = 0
     data.stuck_state = "none"
     data.stuck_timer = 0
+    data.slide_direction = nil
 
     -- render polyline using player's color (characters only)
     safe_destroy_renderings(data.render_objs)
@@ -808,23 +813,45 @@ local function handle_character_movement(player_index, data, player, character)
     return true  -- Stop
   end
 
+  -- A. HANDLE ACTIVE SLIDING MANEUVER
+  if data.stuck_state == "sliding" then
+    data.stuck_timer = data.stuck_timer - 1
+    
+    character.walking_state = { walking = true, direction = data.slide_direction }
+    data.is_auto_walking = true
+
+    if data.stuck_timer <= 0 then
+      if DEBUG_MODE(player_index) then player.print("Click2Move: Slide complete. Retrying path.") end
+      data.stuck_state = "none"
+      data.path = nil
+      data.path_id = nil
+      data.closest_dist_to_goal = 999999
+      data.no_progress_ticks = 0
+      data.retry_count = (data.retry_count or 0) + 1
+      if data.retry_count > MAX_PATH_RETRIES then
+        return true -- Stop and cleanup
+      end
+    end
+    return false -- Consume tick
+  end
+
   local waypoint = data.path[data.current_waypoint]
   if not waypoint or not waypoint.position then return true end  -- Invalid, stop
 
-  -- Stuck detection (Character doesn't need reversing logic, just repath)
+  -- Stuck detection
   local target_for_stuck_check = data.goals[1] or waypoint.position
   if check_progress_and_stuck(data, character.position, target_for_stuck_check) then
-    if DEBUG_MODE(player_index) then player.print("Click2Move: Character stuck; re-pathing/drop goal.") end
-    data.retry_count = (data.retry_count or 0) + 1
-    if data.retry_count > MAX_PATH_RETRIES then
-      return true -- Signal to stop and cleanup
-    else
-      data.path = nil
-      data.path_id = nil
-      data.retry_at = game.tick + PATH_RETRY_DELAY_TICKS
-      data.closest_dist_to_goal = 999999
-      data.no_progress_ticks = 0
-    end
+    if DEBUG_MODE(player_index) then player.print("Click2Move: Character stuck; initiating slide.") end
+    
+    data.stuck_state = "sliding"
+    data.stuck_timer = 30 -- slide for half a second
+    data.no_progress_ticks = 0
+    
+    -- Pick a semi-random orthogonal direction relative to the goal or current direction
+    local dir = get_character_direction(character.position, target_for_stuck_check) or defines.direction.north
+    local offset = (math.random() > 0.5) and 2 or 6 -- +2 is 90 deg clockwise, +6 is 90 deg CCW
+    data.slide_direction = (dir + offset) % 8
+    
     return false
   end
   data.last_position = { x = character.position.x, y = character.position.y }
