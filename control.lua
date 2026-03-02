@@ -10,6 +10,36 @@ local function format_pos(pos)
   return string.format("(%.2f, %.2f)", pos.x, pos.y)
 end
 
+---@class Config
+---@field character_margin number
+---@field proximity_threshold number
+---@field update_interval number
+---@field vehicle_proximity_threshold number
+---@field stuck_threshold number
+---@field vehicle_path_margin number
+
+-- Cached config table (populated on init/load)
+---@type Config
+local config = {
+  character_margin = 0.45,
+  proximity_threshold = 1.5,
+  update_interval = 1,
+  vehicle_proximity_threshold = 6.0,
+  stuck_threshold = 30,
+  vehicle_path_margin = 2.0
+}
+
+local function load_config()
+  ---@diagnostic disable: assign-type-mismatch
+  config.character_margin = settings.global["c2m-character-margin"].value or 0.45
+  config.proximity_threshold = settings.startup["c2m-character-proximity-threshold"].value or 1.5
+  config.update_interval = settings.startup["c2m-update-interval"].value or 1
+  config.vehicle_proximity_threshold = settings.startup["c2m-vehicle-proximity-threshold"].value or 6.0
+  config.stuck_threshold = settings.startup["c2m-stuck-threshold"].value or 30
+  config.vehicle_path_margin = settings.startup["c2m-vehicle-path-margin"].value or 2.0
+  ---@diagnostic enable: assign-type-mismatch
+end
+
 -- Draws a crosshair at a given position for a player. color optional (defaults to green)
 ---@param player LuaPlayer
 ---@param position MapPosition
@@ -148,23 +178,31 @@ local function advance_waypoint(data, current_pos, waypoint_pos, threshold_sq)
   return false
 end
 
--- Detect stuck (shared, returns true if stuck)
+-- NEW: Advanced stuck detection based on progress towards goal
 ---@param data PlayerMoveData
 ---@param current_pos MapPosition
----@param last_pos MapPosition
----@param counter_field "stuck_counter" | "vehicle_stuck_counter
----@param threshold number
----@param min_move number
----@return boolean
-local function detect_stuck(data, current_pos, last_pos, counter_field, threshold, min_move)
-  if not last_pos then return false end
-  local moved_sq = distance_sq(current_pos, last_pos)
-  if math.sqrt(moved_sq) < min_move then  -- Use sqrt only here (rare)
-    data[counter_field] = data[counter_field] + 1
+---@param goal_pos MapPosition
+---@return boolean is_stuck
+local function check_progress_and_stuck(data, current_pos, goal_pos)
+  -- 1. Calculate distance to actual target
+  local dist = distance_sq(current_pos, goal_pos)
+
+  -- 2. Check if we made progress (with a small buffer to prevent jitter resetting it)
+  -- We use a buffer of 0.5 tiles squared (~0.25) so tiny back-and-forth movements don't count as progress
+  if dist < (data.closest_dist_to_goal - 0.25) then
+    data.closest_dist_to_goal = dist
+    data.no_progress_ticks = 0 -- Reset counter, we are moving forward
   else
-    data[counter_field] = 0
+    data.no_progress_ticks = data.no_progress_ticks + 1
   end
-  return data[counter_field] > threshold
+
+  -- 3. Threshold check
+  -- If we haven't made a new "best distance" record in X ticks, we are stuck.
+  -- We use a higher threshold than the old function because we are checking "progress", not "movement"
+  -- Stuck threshold is usually ~30, we double it here for progress checks to be generous
+  local stuck_limit = config.stuck_threshold * 2 
+  
+  return data.no_progress_ticks > stuck_limit
 end
 
 -- Set character walking state
@@ -212,38 +250,12 @@ local function cleanup_movement(entity_to_move, player, data)
   data.last_vehicle_position = nil
   data.retry_count = 0
   data.retry_at = nil
+  -- Reset new stuck logic fields
+  data.closest_dist_to_goal = 999999
+  data.no_progress_ticks = 0
+  data.stuck_state = "none"
+  data.stuck_timer = 0
   data.is_straight_line_move = nil
-end
-
-
----@class Config
----@field character_margin number
----@field proximity_threshold number
----@field update_interval number
----@field vehicle_proximity_threshold number
----@field stuck_threshold number
----@field vehicle_path_margin number
-
--- Cached config table (populated on init/load)
----@type Config
-local config = {
-  character_margin = 0.45,
-  proximity_threshold = 1.5,
-  update_interval = 1,
-  vehicle_proximity_threshold = 6.0,
-  stuck_threshold = 30,
-  vehicle_path_margin = 2.0
-}
-
-local function load_config()
-  ---@diagnostic disable: assign-type-mismatch
-  config.character_margin = settings.global["c2m-character-margin"].value or 0.45
-  config.proximity_threshold = settings.startup["c2m-character-proximity-threshold"].value or 1.5
-  config.update_interval = settings.startup["c2m-update-interval"].value or 1
-  config.vehicle_proximity_threshold = settings.startup["c2m-vehicle-proximity-threshold"].value or 6.0
-  config.stuck_threshold = settings.startup["c2m-stuck-threshold"].value or 30
-  config.vehicle_path_margin = settings.startup["c2m-vehicle-path-margin"].value or 2.0
-  ---@diagnostic enable: assign-type-mismatch
 end
 
 ---@param player_index integer|string
@@ -277,6 +289,10 @@ end
 ---@field goals MapPosition[]
 ---@field vehicle_stuck_counter uint32
 ---@field last_vehicle_position? MapPosition
+---@field closest_dist_to_goal number   -- Best progress made so far
+---@field no_progress_ticks uint32      -- How long we haven't improved our distance
+---@field stuck_state string            -- "none", "reversing", "repathing"
+---@field stuck_timer uint32            -- Timer for the reverse maneuver
 ---@field is_straight_line_move? boolean
 
 -- Persistent-in-session table (cleared on init/config change)
@@ -303,7 +319,11 @@ local function ensure_player_data(player_index)
       is_auto_walking = false,
       goals = {}, -- queue of goals (each is {x=..., y=...})
       vehicle_stuck_counter = 0,
-      last_vehicle_position = nil
+      last_vehicle_position = nil,
+      closest_dist_to_goal = 999999, -- NEW
+      no_progress_ticks = 0,         -- NEW
+      stuck_state = "none",          -- NEW
+      stuck_timer = 0                -- NEW
     }
     player_move_data[player_index] = d
   end
@@ -470,8 +490,13 @@ local function handle_straight_line_movement(player_index, data, player)
   local dist_sq_to_goal = distance_sq(character.position, goal)
   local threshold_sq = config.proximity_threshold ^ 2
 
-  -- Stuck detection
-  if detect_stuck(data, character.position, data.last_position, "stuck_counter", config.stuck_threshold, 0.03) then
+  -- Stuck detection for Mech (Simple straight line doesn't need complex state)
+  if data.last_position and distance_sq(character.position, data.last_position) < (0.03*0.03) then
+    data.stuck_counter = data.stuck_counter + 1
+  else
+    data.stuck_counter = 0
+  end
+  if data.stuck_counter > config.stuck_threshold then
     if DEBUG_MODE(player_index) then player.print("Click2Move: Mech movement stopped (stuck).") end
     return true, changed_gui
   end
@@ -534,6 +559,13 @@ local function on_custom_input(event)
     data.is_auto_walking = false
     data.vehicle_stuck_counter = 0
     data.last_vehicle_position = nil
+    
+    -- Reset advanced stuck fields
+    data.closest_dist_to_goal = 999999
+    data.no_progress_ticks = 0
+    data.stuck_state = "none"
+    data.stuck_timer = 0
+
     if DEBUG_MODE(player.index) then player.print("Click2Move: Set new goal: " .. format_pos(goal)) end
   end
 
@@ -579,6 +611,12 @@ local function on_path_request_finished(event)
     data.retry_count = 0
     changed = true
     data.retry_at = nil
+    
+    -- Reset advanced stuck fields for the new path
+    data.closest_dist_to_goal = 999999
+    data.no_progress_ticks = 0
+    data.stuck_state = "none"
+    data.stuck_timer = 0
 
     -- render polyline using player's color (characters only)
     safe_destroy_renderings(data.render_objs)
@@ -695,31 +733,53 @@ end
 ---@param vehicle LuaEntity
 ---@return boolean
 local function handle_vehicle_movement(player_index, data, player, vehicle)
-  local waypoint = data.path[data.current_waypoint]
-  if not waypoint or not waypoint.position then return true end  -- Invalid, stop
+  -- A. HANDLE ACTIVE UNSTUCK MANEUVER (REVERSING)
+  if data.stuck_state == "reversing" then
+    data.stuck_timer = data.stuck_timer - 1
+    
+    -- Drive backwards and turn left hard to unwedge
+    vehicle.riding_state = {
+      acceleration = defines.riding.acceleration.reversing,
+      direction = defines.riding.direction.left
+    }
 
-  local waypoint_pos = waypoint.position
-
-  -- Stuck detection
-  if detect_stuck(data, vehicle.position, data.last_vehicle_position, "vehicle_stuck_counter", config.stuck_threshold, 0.1) then
-    if DEBUG_MODE(player_index) then player.print("Click2Move: Vehicle stuck; re-pathing.") end
-    data.retry_count = (data.retry_count or 0) + 1
-    if data.retry_count > MAX_PATH_RETRIES then
-      -- This will be handled by cleanup_and_next_goal
-      return true -- Signal to stop and cleanup
-    else
-      data.path = nil
+    if data.stuck_timer <= 0 then
+      -- Maneuver done. Reset state and force a fresh path calculation
+      if DEBUG_MODE(player_index) then player.print("Click2Move: Reverse complete. Retrying path.") end
+      data.stuck_state = "none"
+      data.path = nil 
       data.path_id = nil
-      data.retry_at = game.tick + PATH_RETRY_DELAY_TICKS
+      data.closest_dist_to_goal = 999999 -- Reset progress tracking
+      -- The on_tick loop will see data.path is nil and request a new path
     end
-    return false  -- Don't move this tick, wait for retry
+    return false -- Consume tick, don't do normal movement
   end
-  data.last_vehicle_position = { x = vehicle.position.x, y = vehicle.position.y }
 
-  -- Dynamic threshold
+  -- Standard validation
+  local waypoint = data.path[data.current_waypoint]
+  if not waypoint or not waypoint.position then return true end
+
+  -- B. CHECK STUCK (New Logic)
+  local target_for_stuck_check = data.goals[1] or waypoint.position
+  if check_progress_and_stuck(data, vehicle.position, target_for_stuck_check) then
+    
+    if DEBUG_MODE(player_index) then player.print("Click2Move: Vehicle stuck detected (No progress). Initiating Reverse.") end
+    
+    -- Enter Reversing Mode
+    data.stuck_state = "reversing"
+    data.stuck_timer = 60 -- Reverse for 1 second (60 ticks)
+    data.no_progress_ticks = 0
+    return false
+  end
+
+  -- C. NORMAL MOVEMENT (Your existing logic, slightly cleaned up)
   local speed = vehicle.speed or 0
-  local dynamic_threshold_sq = (config.vehicle_proximity_threshold + speed * 2.0) ^ 2  -- Squared
-  advance_waypoint(data, vehicle.position, waypoint_pos, dynamic_threshold_sq)
+  local dynamic_threshold_sq = (config.vehicle_proximity_threshold + math.abs(speed) * 3.0) ^ 2
+
+  if advance_waypoint(data, vehicle.position, waypoint.position, dynamic_threshold_sq) then
+    -- If we advanced, reset our "closest distance" tracker so we don't false-flag stuck
+    data.closest_dist_to_goal = 999999
+  end
 
   if data.current_waypoint > #data.path then
     local goal_pos = data.goals[1]
@@ -729,10 +789,11 @@ local function handle_vehicle_movement(player_index, data, player, vehicle)
   end
 
   -- Move to current/next waypoint
-  local target_pos = waypoint_pos
+  local target_pos = waypoint.position
   if data.current_waypoint > #data.path then target_pos = data.goals[1] end
   set_vehicle_riding(player, vehicle, target_pos)
-  return false  -- Continue
+  
+  return false
 end
 
 -- Handle character movement
@@ -750,17 +811,19 @@ local function handle_character_movement(player_index, data, player, character)
   local waypoint = data.path[data.current_waypoint]
   if not waypoint or not waypoint.position then return true end  -- Invalid, stop
 
-  -- Stuck detection
-  if detect_stuck(data, character.position, data.last_position, "stuck_counter", config.stuck_threshold, 0.03) then
+  -- Stuck detection (Character doesn't need reversing logic, just repath)
+  local target_for_stuck_check = data.goals[1] or waypoint.position
+  if check_progress_and_stuck(data, character.position, target_for_stuck_check) then
     if DEBUG_MODE(player_index) then player.print("Click2Move: Character stuck; re-pathing/drop goal.") end
     data.retry_count = (data.retry_count or 0) + 1
     if data.retry_count > MAX_PATH_RETRIES then
-      -- This will be handled by cleanup_and_next_goal
       return true -- Signal to stop and cleanup
     else
       data.path = nil
       data.path_id = nil
       data.retry_at = game.tick + PATH_RETRY_DELAY_TICKS
+      data.closest_dist_to_goal = 999999
+      data.no_progress_ticks = 0
     end
     return false
   end
@@ -769,7 +832,11 @@ local function handle_character_movement(player_index, data, player, character)
   -- Dynamic threshold
   local speed_per_tick = character.character_running_speed or 0
   local dynamic_threshold_sq = (config.proximity_threshold + speed_per_tick * 1.5) ^ 2
-  advance_waypoint(data, character.position, waypoint.position, dynamic_threshold_sq)
+  
+  if advance_waypoint(data, character.position, waypoint.position, dynamic_threshold_sq) then
+      -- Reset stuck tracker on waypoint advance
+      data.closest_dist_to_goal = 999999
+  end
 
   if data.current_waypoint > #data.path then
     return true  -- Arrived
