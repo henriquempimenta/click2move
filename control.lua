@@ -775,7 +775,7 @@ local function handle_vehicle_movement(player_index, data, player, vehicle)
   if not waypoint or not waypoint.position then return true end
 
   -- B. CHECK STUCK (New Logic)
-  local target_for_stuck_check = goal.position or waypoint.position
+  local target_for_stuck_check = waypoint.position
   if check_progress_and_stuck(data, vehicle.position, target_for_stuck_check) then
     
     if DEBUG_MODE(player_index) then player.print("Click2Move: Vehicle stuck detected (No progress). Initiating Reverse.") end
@@ -855,7 +855,7 @@ local function handle_character_movement(player_index, data, player, character)
   if not waypoint or not waypoint.position then return true end  -- Invalid, stop
 
   -- Stuck detection
-  local target_for_stuck_check = goal.position or waypoint.position
+  local target_for_stuck_check = waypoint.position
   if check_progress_and_stuck(data, character.position, target_for_stuck_check) then
     if DEBUG_MODE(player_index) then player.print("Click2Move: Character stuck; initiating slide.") end
     
