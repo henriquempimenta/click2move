@@ -1,6 +1,6 @@
 --[[
   Click2Move - Movement Handlers
-  All tick-based movement logic: stuck detection, character, vehicle, and mech-armor handlers.
+  All tick-based movement logic: stuck detection, character, vehicle, and straight-line handlers.
 ]]
 
 local Util = require("scripts/util")
@@ -38,7 +38,7 @@ function Movement.check_progress_and_stuck(data, current_pos, goal_pos)
   return data.no_progress_ticks > stuck_limit
 end
 
--- Handle straight-line mech-armor movement (extracted branch)
+-- Handle straight-line movement for mech-armor / jetpack (extracted branch)
 ---@param player_index integer
 ---@param data PlayerMoveData
 ---@param player LuaPlayer
@@ -50,16 +50,16 @@ function Movement.handle_straight_line(player_index, data, player, request_paths
   local goal = data.goals[1]
   local changed_gui = false
 
-  if not character or not goal or not PlayerData.is_wearing_mech(player) then
-    if character and goal and not PlayerData.is_wearing_mech(player) then
-      if Config.is_debug(player_index) then player.print("Click2Move: Mech-armor removed, switching to pathfinding.") end
+  if not character or not goal or not PlayerData.is_bypassing_pathfinding(player) then
+    if character and goal and not PlayerData.is_bypassing_pathfinding(player) then
+      if Config.is_debug(player_index) then player.print("Click2Move: Straight-line condition ended, switching to pathfinding.") end
       data.is_straight_line_move = nil
       changed_gui = request_paths_fn(player_index) -- Capture changed from path request
     end
     return true, changed_gui  -- Stop
   end
 
-  local dist_sq_to_goal = Util.distance_sq(character.position, goal)
+  local dist_sq_to_goal = Util.distance_sq(character.position, goal.position)
   local threshold_sq = config.proximity_threshold ^ 2
 
   -- Stuck detection for Mech (Simple straight line doesn't need complex state)
@@ -69,7 +69,7 @@ function Movement.handle_straight_line(player_index, data, player, request_paths
     data.stuck_counter = 0
   end
   if data.stuck_counter > config.stuck_threshold then
-    if Config.is_debug(player_index) then player.print("Click2Move: Mech movement stopped (stuck).") end
+    if Config.is_debug(player_index) then player.print("Click2Move: Straight-line movement stopped (stuck).") end
     return true, changed_gui
   end
   data.last_position = { x = character.position.x, y = character.position.y }

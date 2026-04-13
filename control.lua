@@ -32,8 +32,8 @@ local function on_custom_input(event)
   local data = PlayerData.ensure(player.index)
   local goal = { x = event.cursor_position.x, y = event.cursor_position.y }
 
-  -- If wearing mech armor, use straight-line movement and bypass pathfinding
-  if PlayerData.is_wearing_mech(player) and not (player.vehicle or player.character.vehicle) then
+  -- If wearing mech armor or jetpacking, use straight-line movement and bypass pathfinding
+  if PlayerData.is_bypassing_pathfinding(player) and not (player.vehicle or player.character.vehicle) then
     data.goals = { { position = goal } }
     changed = true
     data.is_straight_line_move = true -- Custom flag for our new mode

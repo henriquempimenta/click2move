@@ -120,4 +120,22 @@ function PlayerData.is_wearing_mech(player)
   return armor_inv[1].name == "mech-armor"
 end
 
+-- Check if the player is currently jetpacking (requires jetpack mod)
+---@param player LuaPlayer
+---@return boolean
+function PlayerData.is_jetpacking(player)
+  if not player or not player.character then return false end
+  if not remote.interfaces["jetpack"] or not remote.interfaces["jetpack"]["is_jetpacking"] then
+    return false
+  end
+  return remote.call("jetpack", "is_jetpacking", { character = player.character })
+end
+
+-- Check if the player should bypass pathfinding (mech armor or jetpack)
+---@param player LuaPlayer
+---@return boolean
+function PlayerData.is_bypassing_pathfinding(player)
+  return PlayerData.is_wearing_mech(player) or PlayerData.is_jetpacking(player)
+end
+
 return PlayerData
