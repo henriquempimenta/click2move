@@ -7,6 +7,16 @@ local Util = require("scripts/util")
 
 local Rendering = {}
 
+local function copy_color(color, alpha)
+  local source = color or {r = 0.1, g = 0.8, b = 0.1, a = 0.9}
+  return {
+    r = source.r or source[1] or 0.1,
+    g = source.g or source[2] or 0.8,
+    b = source.b or source[3] or 0.1,
+    a = alpha or source.a or source[4] or 0.9
+  }
+end
+
 -- Draws a crosshair at a given position for a player. color optional (defaults to green)
 ---@param player LuaPlayer
 ---@param position MapPosition
@@ -14,9 +24,7 @@ local Rendering = {}
 ---@return LuaRenderObject[]
 function Rendering.draw_target_crosshair(player, position, color)
   local size = 0.5
-  local default_color = {r = 0.1, g = 0.8, b = 0.1, a = 0.9}
-  local col = color or player.color or default_color
-  if not col.a then col.a = 0.9 end
+  local col = copy_color(color or player.color, 0.9)
   local surface = player.surface
   local players = {player}
   local time_to_live = 600 -- 10 seconds
@@ -44,6 +52,25 @@ function Rendering.draw_target_crosshair(player, position, color)
   return objs
 end
 
+---@param player LuaPlayer
+---@param position MapPosition
+---@param index uint32
+---@param color Color
+---@return LuaRenderObject
+function Rendering.draw_goal_number(player, position, index, color)
+  return rendering.draw_text{
+    text = tostring(index),
+    color = copy_color(color or player.color, index == 1 and 1 or 0.65),
+    target = position,
+    surface = player.surface,
+    players = {player},
+    scale = 1.2,
+    alignment = "center",
+    vertical_alignment = "middle",
+    time_to_live = 600
+  }
+end
+
 -- Render all paths and crosshairs for a player's goal queue
 ---@param player_index integer|string
 ---@param player_move_data table<uint32, PlayerMoveData>
@@ -62,7 +89,7 @@ function Rendering.render_paths_for_player(player_index, player_move_data)
         if wp and wp.position then table.insert(points, wp.position) end
       end
 
-      local path_color = player.color or {r = 0.1, g = 0.8, b = 0.1, a = 0.9}
+      local path_color = copy_color(player.color, 0.9)
       local path_width = 2
       if player.vehicle then
         path_color.a = 0.5
@@ -101,6 +128,7 @@ function Rendering.render_paths_for_player(player_index, player_move_data)
     end
     local crosshair_objs = Rendering.draw_target_crosshair(player, goal_data.position, player.color)
     for _, o in ipairs(crosshair_objs) do table.insert(data.render_objs, o) end
+    table.insert(data.render_objs, Rendering.draw_goal_number(player, goal_data.position, i, player.color))
   end
 end
 

@@ -10,13 +10,19 @@ local Navigation = require("scripts/navigation")
 
 local Movement = {}
 
+local function set_spider_autopilot(spider, position)
+  return pcall(function()
+    spider.autopilot_destination = position
+  end)
+end
+
 -- Advanced stuck detection based on progress towards goal
 ---@param data PlayerMoveData
 ---@param current_pos MapPosition
 ---@param goal_pos MapPosition
 ---@return boolean is_stuck
-function Movement.check_progress_and_stuck(data, current_pos, goal_pos)
-  local config = Config.get()
+function Movement.check_progress_and_stuck(data, current_pos, goal_pos, player_index)
+  local config = Config.get(player_index)
   -- 1. Calculate distance to actual target
   local dist = Util.distance_sq(current_pos, goal_pos)
 
@@ -45,14 +51,14 @@ end
 ---@param request_paths_fn fun(player_index: integer|string): boolean
 ---@return boolean stop_movement, boolean changed_gui
 function Movement.handle_straight_line(player_index, data, player, request_paths_fn)
-  local config = Config.get()
+  local config = Config.get(player_index)
   local character = player.character
   local goal = data.goals[1]
   local changed_gui = false
 
   if not character or not goal or not PlayerData.is_bypassing_pathfinding(player) then
     if character and goal and not PlayerData.is_bypassing_pathfinding(player) then
-      if Config.is_debug(player_index) then player.print("Click2Move: Straight-line condition ended, switching to pathfinding.") end
+      if Config.is_debug(player_index, "path") then player.print("Click2Move: Straight-line condition ended, switching to pathfinding.") end
       data.is_straight_line_move = nil
       changed_gui = request_paths_fn(player_index) -- Capture changed from path request
     end
@@ -69,7 +75,7 @@ function Movement.handle_straight_line(player_index, data, player, request_paths
     data.stuck_counter = 0
   end
   if data.stuck_counter > config.stuck_threshold then
-    if Config.is_debug(player_index) then player.print("Click2Move: Straight-line movement stopped (stuck).") end
+    if Config.is_debug(player_index, "stuck") then player.print("Click2Move: Straight-line movement stopped (stuck).") end
     return true, changed_gui
   end
   data.last_position = { x = character.position.x, y = character.position.y }
@@ -90,7 +96,26 @@ end
 ---@param vehicle LuaEntity
 ---@return boolean
 function Movement.handle_vehicle(player_index, data, player, vehicle)
-  local config = Config.get()
+  local config = Config.get(player_index)
+
+  if vehicle.type == "spider-vehicle" then
+    local goal = data.goals[1]
+    if not goal then return true end
+
+    local threshold_sq = config.vehicle_proximity_threshold ^ 2
+    if Util.distance_sq(vehicle.position, goal.position) < threshold_sq then
+      set_spider_autopilot(vehicle, nil)
+      return true
+    end
+
+    local ok = set_spider_autopilot(vehicle, goal.position)
+    if not ok then
+      if Config.is_debug(player_index, "vehicle") then player.print("Click2Move: Spidertron autopilot is not available for this vehicle.") end
+      return true
+    end
+
+    return false
+  end
 
   -- A. HANDLE ACTIVE UNSTUCK MANEUVER (REVERSING)
   if data.stuck_state == "reversing" then
@@ -103,7 +128,7 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
     }
 
     if data.stuck_timer <= 0 then
-      if Config.is_debug(player_index) then player.print("Click2Move: Reverse complete. Retrying path.") end
+      if Config.is_debug(player_index, "vehicle") then player.print("Click2Move: Reverse complete. Retrying path.") end
       data.stuck_state = "none"
       if data.goals[1] then
         data.goals[1].path = nil 
@@ -124,9 +149,9 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
 
   -- B. CHECK STUCK (New Logic)
   local target_for_stuck_check = waypoint.position
-  if Movement.check_progress_and_stuck(data, vehicle.position, target_for_stuck_check) then
+  if Movement.check_progress_and_stuck(data, vehicle.position, target_for_stuck_check, player_index) then
     
-    if Config.is_debug(player_index) then player.print("Click2Move: Vehicle stuck detected (No progress). Initiating Reverse.") end
+    if Config.is_debug(player_index, "vehicle") then player.print("Click2Move: Vehicle stuck detected (No progress). Initiating Reverse.") end
     
     -- Enter Reversing Mode
     data.stuck_state = "reversing"
@@ -166,10 +191,10 @@ end
 ---@param character LuaEntity
 ---@return boolean
 function Movement.handle_character(player_index, data, player, character)
-  local config = Config.get()
+  local config = Config.get(player_index)
 
   if character.walking_state and character.walking_state.walking and not data.is_auto_walking then
-    if Config.is_debug(player_index) then player.print("Click2Move: Player manually moved, cancelling auto-walk.") end
+    if Config.is_debug(player_index, "queue") then player.print("Click2Move: Player manually moved, cancelling auto-walk.") end
     return true  -- Stop
   end
 
@@ -181,7 +206,7 @@ function Movement.handle_character(player_index, data, player, character)
     data.is_auto_walking = true
 
     if data.stuck_timer <= 0 then
-      if Config.is_debug(player_index) then player.print("Click2Move: Slide complete. Retrying path.") end
+      if Config.is_debug(player_index, "stuck") then player.print("Click2Move: Slide complete. Retrying path.") end
       data.stuck_state = "none"
       local goal = data.goals[1]
       if goal then
@@ -206,8 +231,8 @@ function Movement.handle_character(player_index, data, player, character)
 
   -- Stuck detection
   local target_for_stuck_check = waypoint.position
-  if Movement.check_progress_and_stuck(data, character.position, target_for_stuck_check) then
-    if Config.is_debug(player_index) then player.print("Click2Move: Character stuck; initiating slide.") end
+  if Movement.check_progress_and_stuck(data, character.position, target_for_stuck_check, player_index) then
+    if Config.is_debug(player_index, "stuck") then player.print("Click2Move: Character stuck; initiating slide.") end
     
     data.stuck_state = "sliding"
     data.stuck_timer = 30 -- slide for half a second
@@ -255,12 +280,16 @@ end
 ---@param render_fn fun(player_index: integer|string, data_table: table)
 ---@return boolean
 function Movement.cleanup_and_next_goal(player_index, data, player, entity_to_move, changed, request_paths_fn, render_fn)
+  local move_entity = data.move_entity
   PlayerData.cleanup_movement(entity_to_move, player, data)
   changed = true -- Cleanup always changes state relevant to GUI
   if data.goals and #data.goals > 0 then
     table.remove(data.goals, 1)
   end
   if data.goals and #data.goals > 0 then
+    if move_entity and move_entity.valid then
+      data.move_entity = move_entity
+    end
     local path_request_changed = request_paths_fn(player_index)
     changed = changed or path_request_changed
   else

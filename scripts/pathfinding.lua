@@ -17,14 +17,16 @@ local Pathfinding = {}
 ---@param goal MapPosition
 ---@return LuaSurface.request_path_param | nil
 function Pathfinding.create_path_request_params(player, start_pos, goal)
-  local entity_to_move = player.vehicle or player.character
+  local data = PlayerData.get_all()[player.index]
+  local entity_to_move = data and data.move_entity or player.vehicle or player.character
   if not entity_to_move then return nil end
 
-  local config = Config.get()
+  local config = Config.get(player.index)
+  local is_vehicle_path = entity_to_move.type ~= "character"
   local bounding_box = entity_to_move.prototype and entity_to_move.prototype.collision_box or {{-0.2,-0.2},{0.2,0.2}}
   ---@type number
   local margin = 0
-  if player.character.vehicle then
+  if is_vehicle_path then
     margin = config.vehicle_path_margin
   else
     margin = config.character_margin
@@ -49,8 +51,9 @@ function Pathfinding.create_path_request_params(player, start_pos, goal)
     start = start_pos,
     goal = goal,
     pathfind_flags = {
-      allow_destroy_friendly_entities = (not player.vehicle),
-      cache = (player.vehicle ~= nil),
+      allow_destroy_friendly_entities = (not is_vehicle_path),
+      cache = is_vehicle_path,
+      prefer_straight_paths = is_vehicle_path and config.vehicle_prefer_straight_paths,
     },
     force = player.force.name,
     entity_to_ignore = entity_to_move
@@ -65,12 +68,31 @@ function Pathfinding.request_paths_for_player(player_index)
   if not player or not player.valid or not player.connected then return false end
   local data = PlayerData.ensure(player_index)
   if not data.goals or #data.goals == 0 then return false end
-  local entity_to_move = player.vehicle or player.character
-  if not entity_to_move then return false end
+  local entity_to_move = data.move_entity or player.vehicle or player.character
+  if not entity_to_move or not entity_to_move.valid then return false end
 
   local changed = false
 
+  if entity_to_move.type == "spider-vehicle" then
+    for _, goal_data in ipairs(data.goals) do
+      if not goal_data.path then
+        goal_data.path = { { position = goal_data.position } }
+        goal_data.path_id = nil
+        goal_data.retry_at = nil
+        changed = true
+      end
+    end
+    if changed then
+      Rendering.render_paths_for_player(player_index, PlayerData.get_all())
+    end
+    return changed
+  end
+
   for i, goal_data in ipairs(data.goals) do
+    if goal_data.retry_at and game.tick >= goal_data.retry_at then
+      goal_data.retry_at = nil
+    end
+
     if not goal_data.path and not goal_data.path_id and not goal_data.retry_at then
       local start_pos
       if i == 1 then
@@ -85,7 +107,7 @@ function Pathfinding.request_paths_for_player(player_index)
         goal_data.path_id = path_id
         goal_data.retry_count = goal_data.retry_count or 0
         changed = true
-        if Config.is_debug(player_index) then
+        if Config.is_debug(player_index, "path") then
           player.print("Click2Move: Requested queued path for " .. Util.format_pos(goal_data.position) .. " (player " .. player_index .. ")")
         end
       else
@@ -136,7 +158,7 @@ function Pathfinding.on_path_request_finished(event)
 
   -- if path present and non-empty
   if event.path and #event.path > 0 then
-    if Config.is_debug(matched_player_index) then player.print("Click2Move: Path found with " .. #event.path .. " waypoints for player " .. matched_player_index) end
+    if Config.is_debug(matched_player_index, "path") then player.print("Click2Move: Path found with " .. #event.path .. " waypoints for player " .. matched_player_index) end
     goal_data.path = event.path
     if matched_goal_index == 1 then
       data.current_waypoint = 1
@@ -162,9 +184,9 @@ function Pathfinding.on_path_request_finished(event)
       goal_data.retry_count = (goal_data.retry_count or 0) + 1
       if goal_data.retry_count <= PlayerData.MAX_PATH_RETRIES then
         goal_data.retry_at = game.tick + PlayerData.PATH_RETRY_DELAY_TICKS
-        if Config.is_debug(matched_player_index) then player.print("Click2Move: try_again_later - retrying in " .. PlayerData.PATH_RETRY_DELAY_TICKS .. " ticks (attempt " .. goal_data.retry_count .. ")") end
+        if Config.is_debug(matched_player_index, "path") then player.print("Click2Move: try_again_later - retrying in " .. PlayerData.PATH_RETRY_DELAY_TICKS .. " ticks (attempt " .. goal_data.retry_count .. ")") end
       else
-        if Config.is_debug(matched_player_index) then player.print("Click2Move: Max retries reached, dropping goal.") end
+        if Config.is_debug(matched_player_index, "path") then player.print("Click2Move: Max retries reached, dropping goal.") end
         -- drop current goal and try next
         table.remove(data.goals, matched_goal_index)
         Rendering.render_paths_for_player(matched_player_index, PlayerData.get_all())

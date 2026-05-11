@@ -16,6 +16,7 @@ local PlayerData = {}
 
 ---@class PlayerMoveData
 ---@field current_waypoint uint32
+---@field move_entity? LuaEntity
 ---@field render_objs? LuaRenderObject[]
 ---@field last_position? MapPosition
 ---@field stuck_counter uint32
@@ -63,6 +64,7 @@ function PlayerData.ensure(player_index)
   if not d then
     d = {
       current_waypoint = 1,
+      move_entity = nil,
       render_objs = nil,
       last_position = nil,
       stuck_counter = 0,
@@ -89,12 +91,17 @@ function PlayerData.cleanup_movement(entity_to_move, player, data)
   if entity_to_move and entity_to_move.valid then
     if entity_to_move.type == "character" then
       entity_to_move.walking_state = { walking = false, direction = defines.direction.north }
+    elseif entity_to_move.type == "spider-vehicle" then
+      pcall(function()
+        entity_to_move.autopilot_destination = nil
+      end)
     elseif player.vehicle then
       entity_to_move.riding_state = { direction = defines.riding.direction.straight, acceleration = defines.riding.acceleration.braking }
     end
   end
   Util.safe_destroy_renderings(data.render_objs)
   data.render_objs = nil
+  data.move_entity = nil
   data.current_waypoint = 1
   data.is_auto_walking = false
   data.stuck_counter = 0

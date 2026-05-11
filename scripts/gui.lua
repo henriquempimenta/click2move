@@ -15,6 +15,25 @@ GUI.LABEL_NAME = "c2m_status_label"
 GUI.CANCEL_NAME = "c2m_cancel_button"
 
 ---@param player LuaPlayer
+---@param reason? string
+---@return boolean
+function GUI.cancel_movement(player, reason)
+  if not player or not player.valid then return false end
+
+  local data = PlayerData.get_all()[player.index]
+  if data then
+    PlayerData.cleanup_movement(data.move_entity or player.vehicle or player.character, player, data)
+    PlayerData.remove(player.index)
+  end
+
+  if Config.is_debug(player.index, "queue") then
+    player.print("Click2Move: Auto-walk cancelled" .. (reason and (" (" .. reason .. ").") or "."))
+  end
+  GUI.update(player.index)
+  return data ~= nil
+end
+
+---@param player LuaPlayer
 ---@param data PlayerMoveData
 local function create_gui_for_player(player, data)
   if not player or not player.valid then return end
@@ -69,16 +88,7 @@ function GUI.on_click(event)
   local player = game.players[event.player_index]
   if not player or not player.valid then return end
 
-  local data = PlayerData.get_all()[player.index]
-  local changed = true
-  if data then
-    -- clear everything for this player
-    Util.safe_destroy_renderings(data.render_objs)
-    PlayerData.remove(player.index)
-  end
-  -- destroy GUI (update will remove if anything left)
-  if Config.is_debug(player.index) then player.print("Click2Move: Auto-walk cancelled by player.") end
-  if changed then GUI.update(player.index) end
+  GUI.cancel_movement(player, "GUI")
 end
 
 return GUI
