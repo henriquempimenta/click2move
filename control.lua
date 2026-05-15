@@ -67,10 +67,6 @@ local function get_command_entity(player)
   return player.character
 end
 
-local function is_remote_view(player)
-  return defines.controllers.remote and player.controller_type == defines.controllers.remote
-end
-
 -- Handles the custom input to initiate movement
 ---@param event EventData.CustomInputEvent
 local function on_custom_input(event)
@@ -84,7 +80,6 @@ local function on_custom_input(event)
     return
   end
   if event.input_name ~= "c2m-move-command" and event.input_name ~= "c2m-move-command-queue" then return end
-  if is_remote_view(player) then return end
   local entity_to_move = get_command_entity(player)
   if not entity_to_move or not player.connected then return end
   if not event.cursor_position then return end

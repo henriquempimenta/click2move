@@ -35,7 +35,7 @@ The default keybind can be changed in Factorio's control settings. Look for "**c
 *   **Uncontrolled Vehicle Movement**: Vehicles may occasionally move erratically. This is likely due to a narrow margin of error in the path following logic.
 *   ~~**Basic Stuck Detection**: The current stuck detection is rudimentary and cannot navigate around obstacles that were not already avoided by the initial pathfinding.~~
 *   **Vehicle Continues in Map View**: The vehicle does not automatically stop when the player opens the map view, which can lead to the vehicle driving off-course while the player is not watching.
-*   **Spidertron Remote View**: Ordering spidertrons from remote view is not supported yet. Click2Move ignores movement clicks while in remote view.
+*   **Spidertron Remote View**: Ordering selected spidertrons from remote view is not supported yet. Remote-view clicks still control the player character or current vehicle.
 *   When removing an item from the hotbar (using MMB), the mod places a walk target. Disable Click2Move from the shortcut bar to avoid this conflict.
 *   The path may cross over pipes.
 ## Mod Settings
