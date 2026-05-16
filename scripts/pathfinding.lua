@@ -51,7 +51,7 @@ function Pathfinding.create_path_request_params(player, start_pos, goal)
     start = start_pos,
     goal = goal,
     pathfind_flags = {
-      allow_destroy_friendly_entities = (not is_vehicle_path),
+      allow_destroy_friendly_entities = false,
       cache = is_vehicle_path,
       prefer_straight_paths = is_vehicle_path and config.vehicle_prefer_straight_paths,
     },

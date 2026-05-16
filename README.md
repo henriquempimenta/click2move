@@ -37,7 +37,7 @@ The default keybind can be changed in Factorio's control settings. Look for "**c
 *   **Vehicle Continues in Map View**: The vehicle does not automatically stop when the player opens the map view, which can lead to the vehicle driving off-course while the player is not watching.
 *   **Spidertron Remote View**: Ordering selected spidertrons from remote view is not supported yet. Remote-view clicks still control the player character or current vehicle.
 *   When removing an item from the hotbar (using MMB), the mod places a walk target. Disable Click2Move from the shortcut bar to avoid this conflict.
-*   The path may cross over pipes.
+*   ~~The path may cross over pipes.~~
 ## Mod Settings
 
 You can adjust these settings in `Settings -> Mod settings`.
