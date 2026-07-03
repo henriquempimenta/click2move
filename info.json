@@ -1,13 +1,13 @@
 {
   "name": "click2move",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "title": "Click to Move",
   "author": "Henrique",
   "contact": "https://github.com/henriquempimenta/click2move",
   "homepage": "https://github.com/henriquempimenta/click2move",
-  "factorio_version": "2.0",
+  "factorio_version": "2.1",
   "dependencies": [
-    "base >= 2.0",
+    "base >= 2.1",
     "(?) jetpack"
   ],
   "description": "Allows players to middle click to move their character to a destination.",

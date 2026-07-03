@@ -1,3 +1,5 @@
+- chore: Mark the mod compatible with Factorio 2.1 and base 2.1
+- fix: Ignore move commands fired from GUI elements so middle-click UI interactions do not create walk targets
 - feat: Refactor mod archive creation to use versioned directory structure
 - feat: Improve API key validation in publish workflow
 - feat: Add GitHub Actions workflow for mod publishing and update info.json with contact and homepage

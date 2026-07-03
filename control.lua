@@ -63,6 +63,7 @@ end
 
 local function get_command_entity(player)
   if not player then return nil end
+  if player.physical_vehicle and player.physical_vehicle.valid then return player.physical_vehicle end
   if player.vehicle and player.vehicle.valid then return player.vehicle end
   return player.character
 end
@@ -83,6 +84,15 @@ local function on_custom_input(event)
   local entity_to_move = get_command_entity(player)
   if not entity_to_move or not player.connected then return end
   if not event.cursor_position then return end
+
+  if event.in_gui or (event.element and event.element.valid) then return end
+
+  if player.surface and entity_to_move.surface and player.surface.index ~= entity_to_move.surface.index then
+    if Config.is_debug(player.index, "path") then
+      player.print("Click2Move: Ignored remote-view command because the viewed surface differs from the vehicle surface.")
+    end
+    return
+  end
 
   -- Prevents the mod to be triggered when interacting with other GUIs, leading to unintentional movement.
   if player.opened_gui_type ~= defines.gui_type.none then return end
