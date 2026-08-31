@@ -4,6 +4,7 @@
 ]]
 
 local Util = require("scripts/util")
+local DebugCounters = require("scripts/debug-counters")
 
 local Rendering = {}
 
@@ -27,7 +28,6 @@ function Rendering.draw_target_crosshair(player, position, color)
   local col = copy_color(color or player.color, 0.9)
   local surface = player.surface
   local players = {player}
-  local time_to_live = 600 -- 10 seconds
 
   ---@type LuaRenderObject[]
   local objs = {}
@@ -37,8 +37,7 @@ function Rendering.draw_target_crosshair(player, position, color)
     from = {x = position.x - size, y = position.y},
     to   = {x = position.x + size, y = position.y},
     surface = surface,
-    players = players,
-    time_to_live = time_to_live
+    players = players
   })
   table.insert(objs, rendering.draw_line{
     color = col,
@@ -46,8 +45,7 @@ function Rendering.draw_target_crosshair(player, position, color)
     from = {x = position.x, y = position.y - size},
     to   = {x = position.x, y = position.y + size},
     surface = surface,
-    players = players,
-    time_to_live = time_to_live
+    players = players
   })
   return objs
 end
@@ -66,8 +64,7 @@ function Rendering.draw_goal_number(player, position, index, color)
     players = {player},
     scale = 1.2,
     alignment = "center",
-    vertical_alignment = "middle",
-    time_to_live = 600
+    vertical_alignment = "middle"
   }
 end
 
@@ -81,12 +78,31 @@ function Rendering.render_paths_for_player(player_index, player_move_data)
 
   Util.safe_destroy_renderings(data.render_objs)
   data.render_objs = {}
+  local entity = data.move_entity or player.vehicle or player.character
 
   for i, goal_data in ipairs(data.goals) do
     if goal_data.path and #goal_data.path > 0 then
       local points = {}
-      for _, wp in ipairs(goal_data.path) do
-        if wp and wp.position then table.insert(points, wp.position) end
+      local anchor
+      local active_anchor_entity
+      local first_waypoint = 1
+      if i == 1 and entity and entity.valid then
+        anchor = entity.position
+        active_anchor_entity = entity
+        first_waypoint = data.current_waypoint or 1
+      elseif i > 1 and data.goals[i - 1] then
+        anchor = data.goals[i - 1].position
+      end
+      if anchor then points[#points + 1] = anchor end
+
+      for waypoint_index = first_waypoint, #goal_data.path do
+        local wp = goal_data.path[waypoint_index]
+        if wp and wp.position then
+          local previous = points[#points]
+          if not previous or Util.distance_sq(previous, wp.position) > 0.0001 then
+            points[#points + 1] = wp.position
+          end
+        end
       end
 
       local path_color = copy_color(player.color, 0.9)
@@ -97,19 +113,19 @@ function Rendering.render_paths_for_player(player_index, player_move_data)
       else
         path_color.a = 0.9
       end
-      
+
       if i > 1 then path_color.a = path_color.a * 0.5 end
 
       for j = 1, math.max(0, #points - 1) do
-        local from = points[j]; local to = points[j+1]
+        local from = (j == 1 and active_anchor_entity) or points[j]
+        local to = points[j+1]
         local seg = rendering.draw_line{
-          color = path_color, 
+          color = path_color,
           width = path_width,
           from = from,
           to = to,
-          surface = player.surface,
-          players = {player},
-          time_to_live = 600
+          surface = entity and entity.valid and entity.surface or player.surface,
+          players = {player}
         }
         table.insert(data.render_objs, seg)
       end
@@ -119,9 +135,8 @@ function Rendering.render_paths_for_player(player_index, player_move_data)
           color = path_color,
           radius = 0.3,
           target = points[1],
-          surface = player.surface,
-          players = {player},
-          time_to_live = 600
+          surface = entity and entity.valid and entity.surface or player.surface,
+          players = {player}
         }
         table.insert(data.render_objs, dot)
       end
@@ -130,6 +145,8 @@ function Rendering.render_paths_for_player(player_index, player_move_data)
     for _, o in ipairs(crosshair_objs) do table.insert(data.render_objs, o) end
     table.insert(data.render_objs, Rendering.draw_goal_number(player, goal_data.position, i, player.color))
   end
+
+  DebugCounters.count("render_objects_created", #data.render_objs)
 end
 
 return Rendering

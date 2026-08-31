@@ -1,3 +1,16 @@
+- feat(routing): add belt-aware and dual-phase character routing (v0.2.0)
+  - Steps off opposing transport belts and can ride favorable belts
+  - Adds an optional background belt-graph route search and live strategy switcher
+  - Adds immediate manual-movement cancellation and routing diagnostics
+  - Keeps consecutive belt escapes in one clear lane instead of zigzagging
+  - Rebases background routes and rejects stale or excessive geometric detours
+  - Completes goals reached on a belt instead of escaping and repeatedly replanning
+  - Validates dual-phase corridor waypoints through Factorio's pathfinder before swapping
+  - Ignores short adverse waypoint kinks within orthogonal belt crossings
+  - Keeps the complete remaining route rendered without a fixed expiry
+- fix(vehicle): predict and safely advance crossed vehicle waypoints
+  - Advances multiple gentle waypoints at speed without cutting sharp corners
+  - Recomputes the steering and stuck-detection target after every advance
 - chore: Mark the mod compatible with Factorio 2.1 and base 2.1
 - fix: Ignore move commands fired from GUI elements so middle-click UI interactions do not create walk targets
 - feat: Refactor mod archive creation to use versioned directory structure

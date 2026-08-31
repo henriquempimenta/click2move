@@ -14,6 +14,9 @@ local Rendering = require("scripts/rendering")
 local GUI = require("scripts/gui")
 local Pathfinding = require("scripts/pathfinding")
 local Movement = require("scripts/movement")
+local DualPhase = require("scripts/dual-phase")
+local DebugInterface = require("scripts/debug-interface")
+local DebugCounters = require("scripts/debug-counters")
 
 local on_tick
 local registered_update_interval = nil
@@ -51,13 +54,51 @@ local function on_lua_shortcut(event)
   toggle_click2move_mode(game.players[event.player_index])
 end
 
+-- Show/hide the routing-strategy switcher.
+---@param event EventData.CustomInputEvent
+local function on_toggle_strategy_panel(event)
+  GUI.toggle_strategy_panel(game.players[event.player_index])
+end
+
 local function on_player_created(event)
   enable_click2move_mode(game.players[event.player_index])
+end
+
+local PER_PLAYER_SETTINGS = {
+  ["c2m-character-margin"] = true,
+  ["c2m-character-proximity-threshold"] = true,
+  ["c2m-vehicle-proximity-threshold"] = true,
+  ["c2m-stuck-threshold"] = true,
+  ["c2m-vehicle-path-margin"] = true,
+  ["c2m-vehicle-prefer-straight-paths"] = true,
+  ["c2m-cancel-on-manual-move"] = true,
+  ["c2m-routing-strategy"] = true,
+  ["c2m-belt-ride"] = true,
+  ["c2m-squeeze-margin"] = true,
+  ["c2m-never-give-up"] = true,
+}
+
+-- Fired by the linked movement custom-inputs, i.e. the player pressed a real
+-- movement key. Handled separately from `on_custom_input` because it must stay
+-- as cheap as possible: it runs on every WASD press whether or not click2move
+-- is doing anything.
+---@param event EventData.CustomInputEvent
+local function on_manual_move(event)
+  local data = PlayerData.get_all()[event.player_index]
+  if not data then return end
+  local player = game.players[event.player_index]
+  if not player or not player.valid then return end
+  if not Config.get(event.player_index).cancel_on_manual_move then return end
+
+  DebugCounters.count("manual_cancels")
+  GUI.cancel_movement(player, "manual movement")
 end
 
 local function on_runtime_mod_setting_changed(event)
   if event.setting == "c2m-update-interval" then
     register_tick_handler()
+  elseif PER_PLAYER_SETTINGS[event.setting] and event.player_index then
+    Config.invalidate(event.player_index)
   end
 end
 
@@ -187,6 +228,18 @@ on_tick = function(event)
         local path_request_changed = Pathfinding.request_paths_for_player(player_index)
         changed = changed or path_request_changed
 
+        -- Advance the Phase-2 belt-graph search, if one is running. This is a
+        -- bounded slice of work per tick, not the whole search: the character
+        -- is walking the Phase-1 route while it runs, which is what makes the
+        -- better route free of any startup delay.
+        if Config.uses_dual_phase(player_index) then
+          local swapped = DualPhase.tick(player, data, Pathfinding.begin_candidate_path)
+          if swapped then
+            Rendering.render_paths_for_player(player_index, PlayerData.get_all())
+            changed = true
+          end
+        end
+
         local goal = data.goals[1]
         if not goal or not goal.path then goto continue_player_loop end -- Waiting; skip
       else
@@ -215,17 +268,29 @@ on_tick = function(event)
   end
 end
 
--- Event registration and initialization
-local function initialize()
+-- Handlers must be registered on both init and load, so they live in one place
+-- rather than in two lists that can silently drift apart.
+local function register_event_handlers()
   script.on_event("c2m-move-command", on_custom_input)
   script.on_event("c2m-move-command-queue", on_custom_input)
   script.on_event("c2m-cancel-command", on_custom_input)
   script.on_event("c2m-toggle-mode", on_custom_input)
+  script.on_event("c2m-manual-move-up", on_manual_move)
+  script.on_event("c2m-manual-move-down", on_manual_move)
+  script.on_event("c2m-manual-move-left", on_manual_move)
+  script.on_event("c2m-manual-move-right", on_manual_move)
   script.on_event(defines.events.on_script_path_request_finished, Pathfinding.on_path_request_finished)
   script.on_event(defines.events.on_gui_click, GUI.on_click)
+  script.on_event(defines.events.on_gui_selection_state_changed, GUI.on_selection_changed)
+  script.on_event("c2m-toggle-strategy-panel", on_toggle_strategy_panel)
   script.on_event(defines.events.on_lua_shortcut, on_lua_shortcut)
   script.on_event(defines.events.on_player_created, on_player_created)
   script.on_event(defines.events.on_runtime_mod_setting_changed, on_runtime_mod_setting_changed)
+end
+
+-- Event registration and initialization
+local function initialize()
+  register_event_handlers()
 
   register_tick_handler()
   for _, player in pairs(game.players) do
@@ -235,19 +300,14 @@ local function initialize()
   PlayerData.clear_all()
 end
 
+-- Remote interfaces are not persisted, so the optional benchmark interface is
+-- considered on every load, not just on init.
+DebugInterface.register()
+
 script.on_init(initialize)
 script.on_configuration_changed(initialize)
 script.on_load(function()
   Config.load()
-  -- re-register handlers on load
-  script.on_event("c2m-move-command", on_custom_input)
-  script.on_event("c2m-move-command-queue", on_custom_input)
-  script.on_event("c2m-cancel-command", on_custom_input)
-  script.on_event("c2m-toggle-mode", on_custom_input)
-  script.on_event(defines.events.on_script_path_request_finished, Pathfinding.on_path_request_finished)
-  script.on_event(defines.events.on_gui_click, GUI.on_click)
-  script.on_event(defines.events.on_lua_shortcut, on_lua_shortcut)
-  script.on_event(defines.events.on_player_created, on_player_created)
-  script.on_event(defines.events.on_runtime_mod_setting_changed, on_runtime_mod_setting_changed)
+  register_event_handlers()
   register_tick_handler()
 end)

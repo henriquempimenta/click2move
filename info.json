@@ -1,6 +1,6 @@
 {
   "name": "click2move",
-  "version": "0.1.12",
+  "version": "0.2.0",
   "title": "Click to Move",
   "author": "Henrique",
   "contact": "https://github.com/henriquempimenta/click2move",
@@ -10,8 +10,13 @@
     "base >= 2.1",
     "(?) jetpack"
   ],
-  "description": "Allows players to middle click to move their character to a destination.",
+  "description": "Allows players to middle click to move their character or vehicle. Includes belt-aware character routing, background route optimization, and predictive vehicle waypoint handling.",
   "package": {
-    "git_publish_branch": "master"
+    "git_publish_branch": "master",
+    "ignore": [
+      "NEW/**",
+      "tests/**",
+      "*.mkv"
+    ]
   }
 }

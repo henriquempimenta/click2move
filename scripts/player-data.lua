@@ -13,6 +13,15 @@ local PlayerData = {}
 ---@field path? PathfinderWaypoint[]
 ---@field retry_count? uint32
 ---@field retry_at? uint32
+---@field fallback_stage? uint32   -- How far down the never-give-up ladder this goal has gone
+---@field relaxed_goal? MapPosition -- Nearest standable point, when the clicked goal was unreachable
+---@field belt_info? table          -- What the belt planner did to this goal's path
+---@field belt_replan_count? uint32 -- Escape-driven replans spent on this goal
+---@field belt_disabled? boolean    -- Replan budget exhausted; walk the raw path for this goal
+---@field belt_search? BeltSearch   -- In-flight Phase-2 belt-graph search
+---@field belt_search_started? uint32
+---@field belt_search_done? boolean -- Phase 2 already ran for this goal; do not restart it
+---@field belt_validation? table     -- In-flight vanilla-pathfinder corridor connection
 
 ---@class PlayerMoveData
 ---@field current_waypoint uint32
@@ -30,6 +39,9 @@ local PlayerData = {}
 ---@field stuck_timer uint32            -- Timer for the reverse maneuver
 ---@field slide_direction? defines.direction
 ---@field is_straight_line_move? boolean
+---@field commanded_direction? defines.direction  -- Last direction we told the character to walk
+---@field belt_plan? BeltPlan                     -- Belt-aware routing state for the active path
+---@field belt_needs_replan? boolean              -- An escape finished; the route was planned from the belt and is stale
 
 -- Persistent-in-session table (cleared on init/config change)
 ---@type table<uint32, PlayerMoveData>
@@ -37,6 +49,16 @@ local player_move_data = {}
 
 -- Retry constants
 PlayerData.MAX_PATH_RETRIES = 5
+
+-- Escape-driven replans get their own budget, separate from MAX_PATH_RETRIES.
+--
+-- A replan after leaving a belt means the escape *worked*; it is progress, not
+-- a failed path request, so it has a separate budget. Planned routes should
+-- already avoid opposing belts, however, and eight reactive escapes is ample
+-- evidence that replanning is cycling. Keep the cap low enough that an unusual
+-- layout degrades to the raw path promptly instead of issuing requests for many
+-- seconds.
+PlayerData.MAX_BELT_REPLANS = 8
 PlayerData.PATH_RETRY_DELAY_TICKS = 60
 
 -- Get the raw data table (for iteration in on_tick)
@@ -104,6 +126,9 @@ function PlayerData.cleanup_movement(entity_to_move, player, data)
   data.move_entity = nil
   data.current_waypoint = 1
   data.is_auto_walking = false
+  data.commanded_direction = nil
+  data.belt_plan = nil
+  data.belt_needs_replan = nil
   data.stuck_counter = 0
   data.last_position = nil
   data.vehicle_stuck_counter = 0
@@ -138,11 +163,23 @@ function PlayerData.is_jetpacking(player)
   return remote.call("jetpack", "is_jetpacking", { character = player.character })
 end
 
--- Check if the player should bypass pathfinding (mech armor or jetpack)
+-- Check if the player should bypass pathfinding (mech armor or jetpack).
+-- is_jetpacking() is a remote.call into another mod; callers in the straight-line
+-- movement path check this multiple times per tick, so cache the result for the
+-- current tick per player to avoid repeated cross-mod calls.
+---@type table<uint32, {tick: uint32, value: boolean}>
+local bypass_cache = {}
+
 ---@param player LuaPlayer
 ---@return boolean
 function PlayerData.is_bypassing_pathfinding(player)
-  return PlayerData.is_wearing_mech(player) or PlayerData.is_jetpacking(player)
+  if not player then return false end
+  local cached = bypass_cache[player.index]
+  if cached and cached.tick == game.tick then return cached.value end
+
+  local value = PlayerData.is_wearing_mech(player) or PlayerData.is_jetpacking(player)
+  bypass_cache[player.index] = { tick = game.tick, value = value }
+  return value
 end
 
 return PlayerData

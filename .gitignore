@@ -1,6 +1,12 @@
 # Packaged mod zip file
 *.zip
 
+# Local candidate/scratch files (the integrated tests live in tests/)
+NEW/
+
+# Local gameplay recordings
+*.mkv
+
 # User-specific editor/IDE files
 .vscode/
 .idea/
