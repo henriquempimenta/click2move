@@ -3,172 +3,87 @@ name: Publish Mod
 on:
   push:
     tags:
-      - 'v[0-9]+\.[0-9]+\.[0-9]+'
+      - 'v*'
+
+permissions:
+  contents: read
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     environment: Portal
-    permissions:
-      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Install dependencies
+      - name: Install check dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq zip
+          sudo apt-get install -y lua5.2 python3 jq
 
-      - name: Determine version and normalize (strip leading "v")
-        id: version
+      - name: Check Lua syntax, regression tests, and packaging
+        run: python3 tools/check.py
+
+      - name: Build and verify release archive
+        id: package
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          set -euxo pipefail
-          # GITHUB_REF is like refs/tags/v1.2.3
-          REF="${GITHUB_REF##refs/tags/}"
-          # strip leading v if present
-          VERSION="${REF#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Update version in info.json (working tree)
-        run: |
-          set -euxo pipefail
-          VERSION="${{ steps.version.outputs.version }}"
-          if [ -z "$VERSION" ]; then
-            echo "VERSION empty; aborting"
-            exit 1
-          fi
-          if [ ! -f info.json ]; then
-            echo "info.json not found"
-            exit 1
-          fi
-          # Overwrite info.json with new version
-          jq ".version = \"$VERSION\"" info.json > info.json.tmp
-          mv info.json.tmp info.json
-          echo "Updated info.json version to $VERSION"
-
-      - name: Generate changelog
-        id: changelog
-        run: |
-          set -euxo pipefail
-          CHANGELOG_FILE="CHANGELOG.md"
-          # Get the previous tag name
-          # This gets the second to last tag from a version-sorted list of tags
-          PREVIOUS_TAG=$(git tag --sort=-v:refname | sed -n '2p')
-
-          if [ -z "$PREVIOUS_TAG" ]; then # if no previous tag, use all commits
-            echo "No previous tag found, creating changelog from all commits."
-            git log --pretty=format:"- %s" --reverse > "$CHANGELOG_FILE"
-          else
-            echo "Generating changelog from $PREVIOUS_TAG to ${{ github.ref_name }}"
-            git log "${PREVIOUS_TAG}".."${{ github.ref_name }}" --pretty=format:"- %s" --reverse > "$CHANGELOG_FILE"
-          fi
-          echo "Generated ${CHANGELOG_FILE}:"
-          cat "$CHANGELOG_FILE"
-
-      - name: Validate info.json (name & version)
-        id: validate
-        run: |
-          set -euxo pipefail
-          NAME=$(jq -r '.name // empty' info.json)
-          VER=$(jq -r '.version // empty' info.json)
-          if [ -z "$NAME" ] || [ -z "$VER" ]; then
-            echo "info.json missing name or version (name='$NAME', version='$VER')"
-            cat info.json
-            exit 1
-          fi
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
-
-      - name: Extract mod name (output for later steps)
-        id: mod
-        run: |
-          echo "name=${{ steps.validate.outputs.name }}" >> "$GITHUB_OUTPUT"
-
-      - name: Create mod archive from working tree
-        id: create-zip
-        run: |
-          set -euxo pipefail
-          VERSION="${{ steps.version.outputs.version }}"
-          MOD_NAME="${{ steps.validate.outputs.name }}"
-          DIR_NAME="${MOD_NAME}_${VERSION}"
-          ZIP_NAME="${DIR_NAME}.zip"
-
-          mkdir "$DIR_NAME"
-          # Copy all tracked files into the versioned folder
-          git ls-files -z | xargs -0 cp --parents -t "$DIR_NAME"
-
-          # Create the zip from that folder
-          zip -r "$ZIP_NAME" "$DIR_NAME"
-
-          echo "zip_file=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          ZIP_FILE=$(python3 tools/package.py --expected-version "$VERSION")
+          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+          echo "mod_name=$(jq -r '.name' info.json)" >> "$GITHUB_OUTPUT"
 
       - name: Initialize upload
         id: init
         env:
           API_KEY: ${{ secrets.API_KEY }}
+          MOD_NAME: ${{ steps.package.outputs.mod_name }}
         run: |
+          set +x
+          set -euo pipefail
           if [ -z "$API_KEY" ]; then
-            echo "Error: API_KEY secret is not set. Please configure it in the 'Portal' environment secrets." >&2
+            echo "Configure API_KEY in the Portal environment before publishing." >&2
             exit 1
           fi
-          set -euxo pipefail
-          MOD_NAME="${{ steps.validate.outputs.name }}"
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://mods.factorio.com/api/v2/mods/releases/init_upload" \
-            -H "Authorization: Bearer $API_KEY" \
-            -F "mod=$MOD_NAME")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-          echo "HTTP code: $HTTP_CODE"
-          echo "Response body: $BODY"
-          # Accept 200 or 201 as success; prefer checking for an upload_url
-          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
-            echo "Init upload failed with HTTP $HTTP_CODE"
-            echo "$BODY" | jq .
+          BODY_FILE=$(mktemp)
+          trap 'rm -f "$BODY_FILE"' EXIT
+          HTTP_CODE=$(curl --silent --show-error --output "$BODY_FILE" --write-out '%{http_code}' \
+            --request POST 'https://mods.factorio.com/api/v2/mods/releases/init_upload' \
+            --header "Authorization: Bearer $API_KEY" --form "mod=$MOD_NAME")
+          if [ "$HTTP_CODE" != 200 ] && [ "$HTTP_CODE" != 201 ]; then
+            echo "Upload initialization failed with HTTP $HTTP_CODE." >&2
             exit 1
           fi
-          UPLOAD_URL=$(echo "$BODY" | jq -r '.upload_url // empty')
-          if [ -z "$UPLOAD_URL" ]; then
-            echo "Response didn't include upload_url"
-            echo "$BODY" | jq .
+          UPLOAD_URL=$(jq -er '.upload_url | select(type == "string" and startswith("https://"))' "$BODY_FILE")
+          if [[ "$UPLOAD_URL" == *$'\n'* || "$UPLOAD_URL" == *$'\r'* ]]; then
+            echo "Invalid upload URL returned by the portal." >&2
             exit 1
           fi
+          MASK_VALUE=${UPLOAD_URL//'%'/'%25'}
+          echo "::add-mask::$MASK_VALUE"
           echo "upload_url=$UPLOAD_URL" >> "$GITHUB_OUTPUT"
 
       - name: Upload and finish release
         env:
           UPLOAD_URL: ${{ steps.init.outputs.upload_url }}
+          ZIP_FILE: ${{ steps.package.outputs.zip_file }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
-          set -euxo pipefail
-          VERSION="${{ steps.version.outputs.version }}"
-          ZIP_FILE="${{ steps.create-zip.outputs.zip_file }}"
-          if [ ! -f "$ZIP_FILE" ]; then
-            echo "Zip file not found: $ZIP_FILE"
-            ls -la
+          set +x
+          set -euo pipefail
+          test -f "$ZIP_FILE"
+          BODY_FILE=$(mktemp)
+          trap 'rm -f "$BODY_FILE"' EXIT
+          HTTP_CODE=$(curl --silent --show-error --output "$BODY_FILE" --write-out '%{http_code}' \
+            --request POST "$UPLOAD_URL" --form "file=@$ZIP_FILE" --form "source_url=$SOURCE_URL")
+          if [ "$HTTP_CODE" != 200 ] && [ "$HTTP_CODE" != 201 ]; then
+            echo "Release upload failed with HTTP $HTTP_CODE." >&2
             exit 1
           fi
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$UPLOAD_URL" \
-            -F "file=@$ZIP_FILE" \
-            -F "source_url=${{ github.server_url }}/${{ github.repository }}")
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-          echo "HTTP code: $HTTP_CODE"
-          echo "Response body: $BODY"
-          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
-            echo "Upload failed with HTTP $HTTP_CODE"
-            echo "$BODY" | jq .
+          if ! jq -e '.success == true' "$BODY_FILE" > /dev/null 2>&1; then
+            echo "The portal did not confirm a successful release upload." >&2
             exit 1
           fi
-          # Print JSON response prettily
-          echo "$BODY" | jq .
-
-      - name: Clean up archive files
-        if: always() # Always run this step to clean up
-        run: |
-          set -euxo pipefail
-          DIR_NAME="${{ steps.validate.outputs.name }}_${{ steps.version.outputs.version }}"
-          ZIP_FILE="${DIR_NAME}.zip"
-          rm -rf "$DIR_NAME"
-          rm -f "$ZIP_FILE"
+          echo "Release uploaded successfully."

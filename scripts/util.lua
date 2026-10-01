@@ -34,17 +34,4 @@ function Util.safe_destroy_renderings(render_objs)
   end
 end
 
--- Debug utility: recursively convert a table to a printable string
----@param tbl any
----@return string
-function Util.tableToString(tbl)
-  if type(tbl) ~= "table" then return tostring(tbl) end
-  local str = "{ "
-  for k, v in pairs(tbl) do
-    str = str .. "[" .. tostring(k) .. "] = " .. Util.tableToString(v) .. ", "
-  end
-  str = str:sub(1, -3) .. " }"
-  return str
-end
-
 return Util

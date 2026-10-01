@@ -1,0 +1,27 @@
+name: Check Mod
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install check dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.2 python3 jq
+
+      - name: Check Lua syntax, regression tests, and packaging
+        run: python3 tools/check.py
+
+      - name: Build and verify runtime archive
+        run: python3 tools/package.py

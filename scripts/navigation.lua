@@ -89,24 +89,20 @@ end
 
 -- Set character walking state
 ---@param character LuaEntity
----@param data PlayerMoveData
 ---@param waypoint_pos MapPosition
-function Navigation.set_character_walking(character, data, waypoint_pos)
+function Navigation.set_character_walking(character, waypoint_pos)
   local direction = Navigation.get_character_direction(character.position, waypoint_pos)
   if direction then
-    data.is_auto_walking = true
     character.walking_state = { walking = true, direction = direction }
   else
-    data.is_auto_walking = false
     character.walking_state = { walking = false, direction = defines.direction.north }
   end
 end
 
 -- Set vehicle riding state
----@param player LuaPlayer
 ---@param vehicle LuaEntity
 ---@param target_pos MapPosition
-function Navigation.set_vehicle_riding(player, vehicle, target_pos)
+function Navigation.set_vehicle_riding(vehicle, target_pos)
   local riding = Navigation.get_vehicle_riding_state(vehicle, target_pos)
   vehicle.riding_state = riding
 end

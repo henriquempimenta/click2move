@@ -43,3 +43,15 @@ data:extend {
     localised_name = {"shortcut-name.c2m-toggle-mode"}
   }
 }
+
+-- Observe the player's configured movement keys without consuming their input.
+for _, control in ipairs({"move-up", "move-down", "move-left", "move-right"}) do
+  data:extend{{
+    type = "custom-input",
+    name = "c2m-manual-" .. control,
+    key_sequence = "",
+    linked_game_control = control,
+    consuming = "none",
+    action = "lua"
+  }}
+end

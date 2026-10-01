@@ -1,3 +1,24 @@
+# Changelog
+
+## 0.1.13 — 2026-10-01
+
+- Keep braking vehicles at destinations until native speed and scripted drift settle before advancing the queue.
+- Handle Hovercrafts 2.1.4 New-mode reverse thrust at rest and braking impulses that cross zero.
+- Approach farther inside the destination radius after braking stops short or overshoots, preventing repeated stops at its edge.
+- Account for harmless quantized Hovercraft New-mode drift jitter when deciding a vehicle has settled.
+- Allow manual vehicle takeover in normal view while remote-view panning preserves the route.
+- Preserve active routes, pending path requests, and destination markers across save/load and configuration changes.
+- Clear the whole character queue on manual takeover, while remote-view panning preserves movement.
+- Preserve queued destinations through flight transitions and recompute ground paths after landing.
+- Measure stuck detection and recovery in game ticks and correct perpendicular slides for Factorio's direction enum.
+- Recompute affected queue legs after a path failure and stop movement when a disconnected player's path callback arrives.
+- Limit path prefetching, reuse persistent path rendering, and cache player settings with proper invalidation.
+- Check Lua syntax, regression tests, and runtime package contents before publishing.
+- Build releases from an explicit runtime allowlist and retain curated native Factorio release notes.
+- Prevent API keys and upload URLs from being exposed by publish-workflow tracing or response logging.
+
+## Earlier changes
+
 - chore: Mark the mod compatible with Factorio 2.1 and base 2.1
 - fix: Ignore move commands fired from GUI elements so middle-click UI interactions do not create walk targets
 - feat: Refactor mod archive creation to use versioned directory structure

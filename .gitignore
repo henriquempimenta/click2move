@@ -1,5 +1,11 @@
 # Packaged mod zip file
 *.zip
+dist/
+__pycache__/
+
+# Downloaded compatibility test mods and local scratch directories
+Hovercrafts_*/
+New Folder/
 
 # User-specific editor/IDE files
 .vscode/

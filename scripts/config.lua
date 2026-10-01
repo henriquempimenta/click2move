@@ -1,8 +1,4 @@
---[[
-  Click2Move - Configuration
-  Settings loading and debug mode checker.
-]]
-
+-- Settings are cached per player and rebuilt when their settings change.
 local Config = {}
 
 ---@class C2MConfig
@@ -14,62 +10,67 @@ local Config = {}
 ---@field vehicle_path_margin number
 ---@field vehicle_prefer_straight_paths boolean
 
--- Cached config table (populated on init/load)
----@type C2MConfig
-local config = {
-  character_margin = 0.45,
-  proximity_threshold = 1.5,
-  update_interval = 1,
-  vehicle_proximity_threshold = 6.0,
-  stuck_threshold = 30,
-  vehicle_path_margin = 2.0,
-  vehicle_prefer_straight_paths = false
+local defaults = {
+  character_margin = 0.45, proximity_threshold = 1.5,
+  vehicle_proximity_threshold = 6.0, stuck_threshold = 30,
+  vehicle_path_margin = 2.0, vehicle_prefer_straight_paths = false
 }
-
-local per_player_defaults = {
-  character_margin = 0.45,
-  proximity_threshold = 1.5,
-  vehicle_proximity_threshold = 6.0,
-  stuck_threshold = 30,
-  vehicle_path_margin = 2.0,
-  vehicle_prefer_straight_paths = false
+local setting_names = {
+  character_margin = "c2m-character-margin",
+  proximity_threshold = "c2m-character-proximity-threshold",
+  vehicle_proximity_threshold = "c2m-vehicle-proximity-threshold",
+  stuck_threshold = "c2m-stuck-threshold",
+  vehicle_path_margin = "c2m-vehicle-path-margin",
+  vehicle_prefer_straight_paths = "c2m-vehicle-prefer-straight-paths"
 }
+local update_interval = 1
+local player_configs = {}
 
 function Config.load()
-  ---@diagnostic disable: assign-type-mismatch
-  config.update_interval = settings.global["c2m-update-interval"].value or 1
-  ---@diagnostic enable: assign-type-mismatch
+  update_interval = settings.global["c2m-update-interval"].value
+  player_configs = {}
 end
 
--- Get the current config table (read-only by convention)
----@param player_index? integer|string
+function Config.on_setting_changed(event)
+  if event.setting == "c2m-update-interval" then
+    Config.load()
+  elseif event.player_index then
+    player_configs[event.player_index] = nil
+  else
+    player_configs = {}
+  end
+end
+
+function Config.remove_player(player_index)
+  player_configs[player_index] = nil
+end
+
+---@param player_index? uint32
 ---@return C2MConfig
 function Config.get(player_index)
-  local player = player_index and game.players[player_index]
-  if player and player.valid then
-    local player_settings = settings.get_player_settings(player)
-    config.character_margin = player_settings["c2m-character-margin"].value or per_player_defaults.character_margin
-    config.proximity_threshold = player_settings["c2m-character-proximity-threshold"].value or per_player_defaults.proximity_threshold
-    config.vehicle_proximity_threshold = player_settings["c2m-vehicle-proximity-threshold"].value or per_player_defaults.vehicle_proximity_threshold
-    config.stuck_threshold = player_settings["c2m-stuck-threshold"].value or per_player_defaults.stuck_threshold
-    config.vehicle_path_margin = player_settings["c2m-vehicle-path-margin"].value or per_player_defaults.vehicle_path_margin
-    config.vehicle_prefer_straight_paths = player_settings["c2m-vehicle-prefer-straight-paths"].value == true
+  if not player_index then return {update_interval = update_interval} end
+  if player_configs[player_index] then return player_configs[player_index] end
+  local player = game.players[player_index]
+  local player_settings = player and player.valid and settings.get_player_settings(player)
+  local config = {update_interval = update_interval}
+  for key, fallback in pairs(defaults) do
+    local setting = player_settings and player_settings[setting_names[key]]
+    config[key] = setting and setting.value
+    if config[key] == nil then config[key] = fallback end
   end
+  config.debug_mode = player_settings and player_settings["c2m-debug-mode"].value == true or false
+  config.debug_categories = {}
+  for _, category in ipairs({"path", "queue", "stuck", "vehicle"}) do
+    local setting = player_settings and player_settings["c2m-debug-" .. category]
+    config.debug_categories[category] = not setting or setting.value ~= false
+  end
+  if player and player.valid then player_configs[player_index] = config end
   return config
 end
 
--- Check if debug mode is enabled for a player
----@param player_index integer|string
----@param category? "path"|"queue"|"stuck"|"vehicle"
----@return boolean
 function Config.is_debug(player_index, category)
-  local p = game.players[player_index]
-  if not p then return false end
-  local player_settings = settings.get_player_settings(p)
-  if player_settings["c2m-debug-mode"].value == false then return false end
-  if not category then return true end
-  local category_setting = player_settings["c2m-debug-" .. category]
-  return not category_setting or category_setting.value ~= false
+  local config = Config.get(player_index)
+  return config.debug_mode and (not category or config.debug_categories[category] ~= false)
 end
 
 return Config

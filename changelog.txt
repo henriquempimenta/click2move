@@ -1,0 +1,26 @@
+---------------------------------------------------------------------------------------------------
+Version: 0.1.13
+Date: 2026-10-01
+  Bugfixes:
+    - Keep braking at vehicle destinations until speed and scripted drift settle before advancing queued goals.
+    - Handle Hovercrafts 2.1.4 New-mode braking impulses that cross zero or restart movement near rest.
+    - Approach farther inside the destination radius after stopping short or overshooting to avoid repeated stops at the edge.
+    - Account for harmless quantized Hovercrafts New-mode drift jitter when checking that a vehicle has settled.
+    - Allow manual vehicle takeover in normal view while preserving movement during remote-view panning.
+    - Preserve active routes and pending requests across save/load and configuration changes.
+    - Clear all queued character destinations on manual takeover without interrupting remote-view panning.
+    - Preserve flight queues and recompute ground paths after landing.
+    - Measure stuck detection and recovery in game ticks and correct perpendicular character slides.
+    - Recompute affected queued paths after a failed leg and stop input during disconnected-player cleanup.
+  Changes:
+    - Limit path prefetching, reuse persistent path rendering, and cache player settings.
+    - Check Lua syntax, regression tests, and runtime packaging before publishing.
+    - Package only an explicit allowlist of runtime files and preserve curated release notes.
+---------------------------------------------------------------------------------------------------
+Version: 0.1.12
+  Changes:
+    - Update compatibility requirements to Factorio 2.1 and base 2.1.
+---------------------------------------------------------------------------------------------------
+Version: 0.1.11
+  Bugfixes:
+    - Disable friendly entity destruction for all path requests.

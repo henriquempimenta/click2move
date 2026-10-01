@@ -7,7 +7,8 @@ A quality-of-life mod that enables point-and-click movement for your character a
 *   **Point-and-Click Movement**: Use a mouse click to set a destination for your character or the vehicle you are driving.
 *   **Path Queuing**: Hold **Shift** while clicking to queue up multiple destinations.
 *   **Numbered Destinations**: Queued destinations are numbered on the map so the route order is visible at a glance.
-*   **Vehicle Support**: Works seamlessly whether you are on foot or in a vehicle.
+*   **Vehicle Support**: Control cars, tanks, and occupied spidertrons as well as your character.
+*   **Vehicle Braking**: Vehicles retain control at destinations until their speed and scripted drift settle before advancing the queue. If braking leaves a vehicle outside the arrival radius, it approaches farther inside and stops again.
 *   **Visual Path**: See the calculated path drawn on the ground, so you know exactly where you're headed.
 *   **Destination Marker**: A crosshair marks your final destination.
 *   **Movement GUI**: A small panel appears in the top-left showing your current destination and the number of queued goals. It also includes a "Cancel" button to immediately stop all automatic movement.
@@ -23,21 +24,20 @@ A quality-of-life mod that enables point-and-click movement for your character a
     *   Click the "Cancel" button in the top-left GUI.
     *   Use the "**Cancel Click2Move**" custom input if you bind one in Factorio's controls.
     *   Move your character manually with the keyboard (WASD).
+    *   Use the vehicle movement keys to take over driving in normal view. Panning in remote view does not cancel movement.
     *   Set a new destination without holding Shift (this will clear the old queue).
 *   **Toggle Mode**: Press **Control + Shift + M** or use the shortcut bar button to enable or disable Click2Move. Disabling it cancels the current movement and ignores future movement clicks until re-enabled.
 
-The default keybind can be changed in Factorio's control settings. Look for "**c2m-move-command**".
+Movement continues while map or remote view is open, so you can inspect the route and pan the camera. Use the cancel command or GUI to stop it from those views.
+
+The default keybind can be changed in Factorio's control settings. Look for "**Click to Move**".
 
 ## Known Issues
 
 *   **Flickering with Mech Armor**: When moving horizontally with mech armor, the character sprite may flicker.
-*   ~~**GUI Command Confusion**: The mod's move command can sometimes be triggered when interacting with other GUIs, leading to unintentional movement.~~
-*   **Uncontrolled Vehicle Movement**: Vehicles may occasionally move erratically. This is likely due to a narrow margin of error in the path following logic.
-*   ~~**Basic Stuck Detection**: The current stuck detection is rudimentary and cannot navigate around obstacles that were not already avoided by the initial pathfinding.~~
-*   **Vehicle Continues in Map View**: The vehicle does not automatically stop when the player opens the map view, which can lead to the vehicle driving off-course while the player is not watching.
+*   **Vehicle Steering**: Steering can overshoot or oscillate, particularly around tight turns or with vehicles that have strong inertia.
 *   **Spidertron Remote View**: Ordering selected spidertrons from remote view is not supported yet. Remote-view clicks still control the player character or current vehicle.
-*   ~~When removing an item from the hotbar (using MMB), the mod places a walk target.~~
-*   ~~The path may cross over pipes.~~
+
 ## Mod Settings
 
 You can adjust these settings in `Settings -> Mod settings`.
@@ -50,16 +50,18 @@ You can adjust these settings in `Settings -> Mod settings`.
 | **Update interval**               | `Int`   | Global            | `1`     | The number of game ticks between movement updates. Lower is smoother but uses more UPS.                 |
 | **Character proximity threshold** | `Float` | Per-Player        | `1.5`   | How close (in tiles) the character must be to a waypoint to consider it "reached".                      |
 | **Vehicle proximity threshold**   | `Float` | Per-Player        | `6.0`   | How close (in tiles) a vehicle must be to the final goal to consider it "reached".                      |
-| **Stuck threshold**               | `Int`   | Per-Player        | `30`    | How many update intervals of no movement before the character/vehicle is considered stuck.              |
+| **Stuck threshold**               | `Int`   | Per-Player        | `30`    | No-progress limit in game ticks. Ordinary paths wait twice this value; straight-line movement waits this value. |
 | **Vehicle path margin**           | `Float` | Per-Player        | `2.0`   | The safety margin added to the vehicle's bounding box for pathfinding.                                  |
 | **Vehicle Prefer Straight Paths** | `Bool`  | Per-Player        | `false` | Asks Factorio's pathfinder to prefer straighter vehicle paths. Can be slower to compute.                |
 
-> **Note**: Settings can be changed on the fly. The global update interval re-registers the movement scheduler when changed.
+> **Note**: Settings can be changed on the fly. The global update interval re-registers the movement scheduler when changed. Vehicles finishing a move keep applying their brakes every tick regardless of this interval.
+
+Stuck recovery lasts 30 game ticks for a character slide and 60 game ticks for a vehicle reverse. These durations and the no-progress limit are independent of the update interval; a larger interval can delay detection until the next scheduled update.
 
 ## Installation
 
-1.  Download the mod from the Factorio Mod Portal (link to be added).
-2.  Place the downloaded `.zip` file into your Factorio `mods` directory.
+1.  Install **Click to Move** from Factorio's in-game Mods menu, or download it from the [Factorio Mod Portal](https://mods.factorio.com/mod/click2move).
+2.  If downloading manually, place the `.zip` file into your Factorio `mods` directory.
     *   **Windows**: `C:\Users\<YourUsername>\AppData\Roaming\Factorio\mods`
     *   **Linux**: `~/.factorio/mods`
     *   **macOS**: `~/Library/Application Support/factorio/mods`
@@ -67,4 +69,20 @@ You can adjust these settings in `Settings -> Mod settings`.
 
 ---
 
-*Author: Me*
+## Development and releases
+
+Run `python3 tools/check.py` from the mod directory to check Lua syntax, run every `tests/*.lua` regression script, and verify packaging. Python 3.10 or newer and Lua with `luac` are required; CI uses Lua 5.2. Install `jq` to include mocked publish-workflow tests.
+
+Build a local release archive with `python3 tools/package.py`. It includes only the files listed in `package-manifest.json`, checks local Lua dependencies and assets, and verifies the finished ZIP. Add new runtime files to the manifest when introducing them. Downloaded mods, tests, editor files, and tooling are excluded.
+
+Optional engine checks require a Factorio 2.1 executable and an unpacked Hovercrafts 2.1.4 directory:
+
+```sh
+python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --hovercraft /path/to/Hovercrafts_2.1.4
+```
+
+The runner uses temporary mod, configuration, and save directories. It tests native entities, Hovercraft physics, rendering, storage, save/load, and configuration migration through the production movement handlers. Initial motion is seeded, scheduler registration is instrumented, and player/UI calls are mocked because the headless saves have no connected players. Interactive controls, obstacle steering, and live multiplayer still require in-game validation.
+
+Before tagging a release, update `info.json` and the curated native `changelog.txt`. The publishing workflow runs the checks and requires the tag version to match `info.json`; it does not regenerate release notes or rewrite the version. Pushing a matching `vX.Y.Z` tag publishes to the mod portal using the `Portal` environment's API key.
+
+*Author: Henrique*

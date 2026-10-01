@@ -1,0 +1,18 @@
+[
+  "info.json",
+  "control.lua",
+  "data.lua",
+  "settings.lua",
+  "scripts/config.lua",
+  "scripts/gui.lua",
+  "scripts/movement.lua",
+  "scripts/navigation.lua",
+  "scripts/pathfinding.lua",
+  "scripts/player-data.lua",
+  "scripts/rendering.lua",
+  "scripts/util.lua",
+  "scripts/vehicle-braking.lua",
+  "locale/en/locale.cfg",
+  "thumbnail.png",
+  "changelog.txt"
+]
