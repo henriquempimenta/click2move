@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.14 — 2026-10-11
+
+- Consume multiple already-passed waypoints on straight path sections using observed character or vehicle motion, including exoskeleton movement and Hovercraft drift.
+- Retain normal turn handling and explicit final destination checks while bounding waypoint work per update and preserving pending motion evidence across save/load.
+- Check ground-path character arrival every tick near the destination to prevent overshooting at larger update intervals.
+- Check flying character arrival every tick near the destination, including powered mech armor at larger update intervals.
+- Cancel stale routes and pending requests when the movement entity changes physical surface.
+- Ignore car passenger commands and clear routes on driver handoff without overwriting the new driver's input.
+- Choose the correct diagonal walking direction when horizontal and vertical distances are equal.
+
 ## 0.1.13 — 2026-10-01
 
 - Keep braking vehicles at destinations until native speed and scripted drift settle before advancing the queue.

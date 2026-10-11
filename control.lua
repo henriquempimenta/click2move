@@ -23,6 +23,7 @@ local function needs_continuous_updates(data)
   local entity = data.move_entity
   local goal = data.goals and data.goals[1]
   return entity and entity.valid and (data.stuck_state == "sliding" or data.stuck_state == "reversing"
+    or data.character_arrival or data.waypoint_scan_pending
     or (entity.type == "car" and (data.vehicle_arrival ~= nil or (goal and not goal.path))))
 end
 
@@ -107,7 +108,8 @@ local function on_player_driving_changed_state(event)
   local player = game.players[event.player_index]
   local data = PlayerData.get_all()[event.player_index]
   local vehicle = data and data.move_entity
-  if vehicle and vehicle.valid and get_command_entity(player) ~= vehicle then
+  if vehicle and vehicle.valid and (get_command_entity(player) ~= vehicle
+      or not PlayerData.can_control_entity(player, vehicle)) then
     GUI.cancel_movement(player, "vehicle changed", true)
   end
 end
@@ -136,6 +138,7 @@ local function on_custom_input(event)
   if not entity_to_move or not entity_to_move.valid or not player.connected then return end
   if entity_to_move.type ~= "character" and entity_to_move.type ~= "car"
       and entity_to_move.type ~= "spider-vehicle" then return end
+  if not PlayerData.can_control_entity(player, entity_to_move) then return end
   if not event.cursor_position then return end
 
   if event.in_gui or (event.element and event.element.valid) then return end
@@ -158,6 +161,7 @@ local function on_custom_input(event)
   local goal = {x = event.cursor_position.x, y = event.cursor_position.y}
   local queue = event.input_name == "c2m-move-command-queue"
     and data.move_entity == entity_to_move and #data.goals > 0
+    and PlayerData.check_route_surface(data, entity_to_move)
 
   if not queue then
     Pathfinding.cancel_player(player.index, data)
@@ -167,10 +171,11 @@ local function on_custom_input(event)
   else
     table.insert(data.goals, {position = goal})
   end
+  PlayerData.check_route_surface(data, entity_to_move)
   local straight_line = entity_to_move.type == "character" and PlayerData.is_bypassing_pathfinding(player)
   if straight_line ~= (data.is_straight_line_move == true) then
     Pathfinding.cancel_player(player.index, data)
-    PlayerData.stop_input(entity_to_move)
+    PlayerData.stop_input(entity_to_move, data)
     PlayerData.reset_movement_state(data)
     for index in ipairs(data.goals) do Pathfinding.invalidate_goal(player.index, index) end
   end
@@ -207,6 +212,14 @@ on_tick = function(event, continuous_only)
       goto continue_player_loop
     end
 
+    if not PlayerData.can_control_entity(player, entity_to_move)
+        or not PlayerData.check_route_surface(data, entity_to_move) then
+      PlayerData.cleanup_movement(entity_to_move, data)
+      PlayerData.remove(player_index)
+      GUI.update(player_index)
+      goto continue_player_loop
+    end
+
     local changed = false
     local gui_update_from_handler = false
 
@@ -226,7 +239,7 @@ on_tick = function(event, continuous_only)
         goto continue_player_loop
       end
       if not goal.path then
-        PlayerData.stop_input(entity_to_move)
+        PlayerData.stop_input(entity_to_move, data)
         goto continue_player_loop
       end
       local vehicle = entity_to_move.type ~= "character" and entity_to_move or nil

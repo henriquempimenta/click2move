@@ -6,6 +6,7 @@ A quality-of-life mod that enables point-and-click movement for your character a
 
 *   **Point-and-Click Movement**: Use a mouse click to set a destination for your character or the vehicle you are driving.
 *   **Path Queuing**: Hold **Shift** while clicking to queue up multiple destinations.
+*   **Waypoint Skipping**: Straight sections consume multiple waypoints already passed between updates, keeping fast characters with exoskeletons and vehicles moving toward the next target. Turns retain their normal proximity rule, and final destinations are checked separately.
 *   **Numbered Destinations**: Queued destinations are numbered on the map so the route order is visible at a glance.
 *   **Vehicle Support**: Control cars, tanks, and occupied spidertrons as well as your character.
 *   **Vehicle Braking**: Vehicles retain control at destinations until their speed and scripted drift settle before advancing the queue. If braking leaves a vehicle outside the arrival radius, it approaches farther inside and stops again.
@@ -30,6 +31,8 @@ A quality-of-life mod that enables point-and-click movement for your character a
 
 Movement continues while map or remote view is open, so you can inspect the route and pan the camera. Use the cancel command or GUI to stop it from those views.
 
+Car and tank commands require the driver's seat. Changing drivers clears the previous driver's route while preserving the new driver's input.
+
 The default keybind can be changed in Factorio's control settings. Look for "**Click to Move**".
 
 ## Known Issues
@@ -48,13 +51,13 @@ You can adjust these settings in `Settings -> Mod settings`.
 | **Debug categories**              | `Bool`  | Per-Player        | `true`  | Filter debug output for pathfinding, queue, stuck recovery, and vehicle control.                        |
 | **Character margin**              | `Float` | Per-Player        | `0.45`  | The safety margin added to the character's bounding box for pathfinding. Larger values avoid tighter gaps. |
 | **Update interval**               | `Int`   | Global            | `1`     | The number of game ticks between movement updates. Lower is smoother but uses more UPS.                 |
-| **Character proximity threshold** | `Float` | Per-Player        | `1.5`   | How close (in tiles) the character must be to a waypoint to consider it "reached".                      |
+| **Character proximity threshold** | `Float` | Per-Player        | `1.5`   | Base arrival radius in tiles for characters on ground paths or in flight; increases with running speed. |
 | **Vehicle proximity threshold**   | `Float` | Per-Player        | `6.0`   | How close (in tiles) a vehicle must be to the final goal to consider it "reached".                      |
 | **Stuck threshold**               | `Int`   | Per-Player        | `30`    | No-progress limit in game ticks. Ordinary paths wait twice this value; straight-line movement waits this value. |
 | **Vehicle path margin**           | `Float` | Per-Player        | `2.0`   | The safety margin added to the vehicle's bounding box for pathfinding.                                  |
 | **Vehicle Prefer Straight Paths** | `Bool`  | Per-Player        | `false` | Asks Factorio's pathfinder to prefer straighter vehicle paths. Can be slower to compute.                |
 
-> **Note**: Settings can be changed on the fly. The global update interval re-registers the movement scheduler when changed. Vehicles finishing a move keep applying their brakes every tick regardless of this interval.
+> **Note**: Settings can be changed on the fly. The global update interval re-registers the movement scheduler when changed. Characters on ground paths or in flight check arrival every tick once the destination is close enough to reach before the next scheduled update. Vehicles finishing a move keep applying their brakes every tick regardless of this interval.
 
 Stuck recovery lasts 30 game ticks for a character slide and 60 game ticks for a vehicle reverse. These durations and the no-progress limit are independent of the update interval; a larger interval can delay detection until the next scheduled update.
 
@@ -81,7 +84,19 @@ Optional engine checks require a Factorio 2.1 executable and an unpacked Hovercr
 python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --hovercraft /path/to/Hovercrafts_2.1.4
 ```
 
-The runner uses temporary mod, configuration, and save directories. It tests native entities, Hovercraft physics, rendering, storage, save/load, and configuration migration through the production movement handlers. Initial motion is seeded, scheduler registration is instrumented, and player/UI calls are mocked because the headless saves have no connected players. Interactive controls, obstacle steering, and live multiplayer still require in-game validation.
+Run the waypoint suite separately; it requires the Factorio executable:
+
+```sh
+python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --waypoints
+```
+
+Its 18 base-game cases test straight and diagonal traversal with real powered exoskeletons, running-speed bonuses, forward/reverse cars, update intervals of 1, 10, and 60 ticks, and saved movement history. With Space Age installed, add `--space-age` to include powered mech armor flight, giving 21 cases:
+
+```sh
+python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --waypoints --space-age
+```
+
+The runner uses temporary mod, configuration, and save directories. It tests native entities, Hovercraft physics, rendering, storage, save/load, and configuration migration through the production movement handlers. Initial motion is seeded, scheduler registration is instrumented, and player/UI calls are mocked because the headless saves have no connected players. Arrival cases must reach the requested destination and finish the queue; clearing a route alone does not count as success. Interactive controls, obstacle steering, and live multiplayer still require in-game validation.
 
 Before tagging a release, update `info.json` and the curated native `changelog.txt`. The publishing workflow runs the checks and requires the tag version to match `info.json`; it does not regenerate release notes or rewrite the version. Pushing a matching `vX.Y.Z` tag publishes to the mod portal using the `Portal` environment's API key.
 

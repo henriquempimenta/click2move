@@ -119,7 +119,7 @@ function Pathfinding.invalidate_goal(player_index, goal_index)
   local data = PlayerData.get_all()[player_index]
   local goal = data and data.goals[goal_index or 1]
   if not goal then return end
-  if (goal_index or 1) == 1 then PlayerData.stop_input(data.move_entity) end
+  if (goal_index or 1) == 1 then PlayerData.stop_input(data.move_entity, data) end
   if goal.path_id then requests[goal.path_id] = nil end
   goal.path_generation = (goal.path_generation or 0) + 1
   goal.path, goal.path_id, goal.retry_at = nil, nil, nil
@@ -148,7 +148,7 @@ function Pathfinding.remove_goal(player_index, goal_index, completed)
   Rendering.clear_goal(goal)
   table.remove(data.goals, goal_index)
   if goal_index == 1 then
-    if not completed then PlayerData.stop_input(data.move_entity) end
+    if not completed then PlayerData.stop_input(data.move_entity, data) end
     PlayerData.reset_movement_state(data, true)
   end
   if not completed then Pathfinding.invalidate_goal(player_index, goal_index) end
@@ -175,6 +175,12 @@ function Pathfinding.request_paths_for_player(player_index, force)
   if not force and data.paths_dirty == false then return false end
   local entity = data.move_entity or player.vehicle or player.character
   if not entity or not entity.valid then return false end
+  if not PlayerData.can_control_entity(player, entity) or not PlayerData.check_route_surface(data, entity) then
+    PlayerData.cleanup_movement(entity, data)
+    PlayerData.remove(player_index)
+    GUI.update(player_index)
+    return false
+  end
   local refresh_rendering = force or data.paths_dirty ~= false
   data.paths_dirty = false
   if data.is_straight_line_move then
@@ -199,7 +205,7 @@ function Pathfinding.request_paths_for_player(player_index, force)
         if id then
           goal.path_id = id
           requests[id] = {player_index = player_index, data = data, goal = goal,
-            generation = goal.path_generation or 0, entity = entity}
+            generation = goal.path_generation or 0, entity = entity, surface_index = entity.surface.index}
         else
           goal.retry_at = game.tick + PlayerData.PATH_RETRY_DELAY_TICKS
           schedule_retry(player_index, data, goal.retry_at)
@@ -252,7 +258,10 @@ function Pathfinding.on_path_request_finished(event)
   if not goal_index then return end
   goal.path_id = nil
   local player = game.players[player_index]
-  if not player or not player.valid or not player.connected or not request.entity.valid then
+  if not player or not player.valid or not player.connected or not request.entity.valid
+      or not PlayerData.can_control_entity(player, request.entity)
+      or not PlayerData.check_route_surface(data, request.entity)
+      or (request.surface_index and request.surface_index ~= request.entity.surface.index) then
     PlayerData.cleanup_movement(data.move_entity, data)
     PlayerData.remove(player_index)
     if player and player.valid then GUI.update(player_index) end

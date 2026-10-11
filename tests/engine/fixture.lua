@@ -5,6 +5,17 @@ local PlayerData = require("scripts/player-data")
 local Config = require("scripts/config")
 local Rendering = require("scripts/rendering")
 local Pathfinding = require("scripts/pathfinding")
+local remove_goal = Pathfinding.remove_goal
+Pathfinding.remove_goal = function(player_index, goal_index, completed)
+  local fixture = storage.c2m_engine_fixture
+  if fixture and goal_index == 1 then
+    assert(completed == true, "native route abandoned instead of arriving: " .. player_index)
+    for _, case in ipairs(fixture.cases) do
+      if case.player_index == player_index then case.successful_completion = true end
+    end
+  end
+  return remove_goal(player_index, goal_index, completed)
+end
 local reloaded = false
 local native_game
 local function bind_game()
@@ -27,7 +38,10 @@ local function bind_game()
     top.add = add_frame
     local frame = add_frame()
     frame.c2m_status_label = {valid = true}
+    local data = PlayerData.get_all()[index]
+    local entity = data and data.move_entity
     players[index] = {index = index, valid = true, connected = true, force = native_game.forces.player,
+      character = entity and entity.type == "car" and entity.get_driver() or entity,
       surface = surface, color = {r = 1, g = 0, b = 0}, gui = {top = top},
       print = function() end,
       is_shortcut_toggled = function() return fixture.preference end,
@@ -72,6 +86,7 @@ local function setup()
   vehicle.speed = 0.2
   local data = PlayerData.ensure(player.index)
   data.move_entity = vehicle
+  player.character = vehicle.get_driver()
   data.goals = {{position = {x = -138, y = -60}, path = {{position = {x = -138, y = -60}}}},
     {position = {x = -100, y = -60}}}
   data.vehicle_arrival = {position = {x = -140, y = -60}, tick = game.tick, stationary_ticks = 5, speed = 0.2}
@@ -185,6 +200,7 @@ c2m_test_bootstrap.on_event(defines.events.on_tick, function(event)
     case.vehicle.energy = case.vehicle.burner.heat_capacity
     if not case.completed_tick then
       if not PlayerData.get_all()[case.player_index] then
+        assert(case.successful_completion, case.name .. " lost its route without successful completion")
         local dx, dy = case.vehicle.position.x - case.goal.x, case.vehicle.position.y - case.goal.y
         assert(dx * dx + dy * dy <= 36, case.name .. " completed outside arrival radius; failed="
           .. tostring(case.data.goal_failed) .. " x=" .. case.vehicle.position.x)

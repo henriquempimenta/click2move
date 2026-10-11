@@ -138,6 +138,7 @@ test("fresh VM reload retains braking until a car actually settles", function()
   local state = engine(10)
   local vehicle = {valid = true, name = "car", type = "car", position = {x = 0, y = 0},
     speed = 0.2, orientation = 0.25, surface = state.surface, prototype = state.character.prototype}
+  vehicle.get_driver = function() return state.character end
   state.player.vehicle, state.player.physical_vehicle = vehicle, vehicle
   local first = vm(state); first.init(); first.command(2)
   first.path(1, {{position = {x = 2, y = 0}}}); first.tick(10)
@@ -208,6 +209,7 @@ test("vehicle commands clear a surviving flight mode", function()
   local runtime = vm(state); runtime.init(); runtime.command(100)
   local vehicle = {valid = true, name = "car", type = "car", position = {x = 0, y = 0},
     speed = 0, orientation = 0.25, surface = state.surface, prototype = state.character.prototype}
+  vehicle.get_driver = function() return state.character end
   state.player.vehicle, state.player.physical_vehicle = vehicle, vehicle
   runtime.command(200)
   local data = runtime.pd.get_all()[1]
@@ -220,6 +222,7 @@ test("pending car paths receive brakes every tick only while needed", function()
   local state = engine(60)
   local vehicle = {valid = true, name = "car", type = "car", position = {x = 0, y = 0},
     speed = 0.2, orientation = 0.25, surface = state.surface, prototype = state.character.prototype}
+  vehicle.get_driver = function() return state.character end
   state.player.vehicle, state.player.physical_vehicle = vehicle, vehicle
   local runtime = vm(state); runtime.init()
   assert(not runtime.events[runtime.env.defines.events.on_tick])
@@ -252,6 +255,7 @@ test("slide and reverse input start immediately and repeat for 30/60 game ticks"
       if kind == "car" then
         entity = {valid = true, name = "car", type = "car", position = {x = 0, y = 0},
           speed = 0, orientation = 0.25, surface = state.surface, prototype = state.character.prototype}
+        entity.get_driver = function() return state.character end
         state.player.vehicle, state.player.physical_vehicle = entity, entity
       end
       local runtime = vm(state); runtime.init(); runtime.command(1000)

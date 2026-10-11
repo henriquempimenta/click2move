@@ -1,4 +1,16 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.1.14
+Date: 2026-10-11
+  Features:
+    - Consume multiple already-passed waypoints on straight path sections using observed character and vehicle motion, including exoskeleton movement and Hovercraft drift.
+  Changes:
+    - Bound waypoint advancement per update and preserve pending motion evidence across save/load while retaining turns and final destination checks.
+  Bugfixes:
+    - Check character arrival every tick near the destination to prevent overshooting at larger update intervals, including powered mech armor flight.
+    - Cancel stale routes and pending requests when the movement entity changes physical surface.
+    - Ignore car passenger commands and clear routes on driver handoff without overwriting the new driver's input.
+    - Choose the correct diagonal walking direction when horizontal and vertical distances are equal despite floating-point roundoff.
+---------------------------------------------------------------------------------------------------
 Version: 0.1.13
 Date: 2026-10-01
   Bugfixes:

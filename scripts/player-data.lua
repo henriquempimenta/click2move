@@ -17,6 +17,11 @@ local PlayerData = {}
 ---@field retry_at? uint32
 
 ---@class PlayerMoveData
+---@field owner_index uint32
+---@field route_surface_index? uint32
+---@field waypoint_motion? {path: PathfinderWaypoint[], entity: LuaEntity, surface_index: uint32, position: MapPosition, tick: uint32, waypoint: uint32, running_speed: number?, sweep_start: MapPosition?, sweep_end: MapPosition?}
+---@field waypoint_scan_pending? boolean
+---@field character_arrival? boolean
 ---@field current_waypoint uint32
 ---@field move_entity? LuaEntity
 ---@field render_objs? LuaRenderObject[]
@@ -74,11 +79,39 @@ function PlayerData.notify_changed()
   if change_handler then change_handler() end
 end
 
+-- Car passengers cannot drive. Driver ownership can be represented by either
+-- a LuaPlayer or its character; an offline player's character may be nil.
+function PlayerData.can_control_entity(player, entity)
+  if not entity or not entity.valid then return false end
+  if entity.type ~= "car" then return true end
+  if not player or not player.valid then return false end
+  local driver = entity.get_driver()
+  return driver == player or (player.character ~= nil and driver == player.character)
+    or (driver and driver.object_name == "LuaEntity" and driver.type == "character" and driver.player == player)
+    or false
+end
+
+-- Routes belong to the tracked entity's physical surface, never the remote
+-- camera surface. Older saves retain this association in their goal rendering.
+function PlayerData.check_route_surface(data, entity)
+  local surface_index = entity.surface and entity.surface.index
+  if data.route_surface_index == nil then
+    local goal = data.goals and data.goals[1]
+    local rendered_surface = goal and goal.rendering and goal.rendering.surface
+    if rendered_surface and rendered_surface.valid == false then return false end
+    data.route_surface_index = rendered_surface and rendered_surface.index or surface_index
+  end
+  return data.route_surface_index == nil or data.route_surface_index == surface_index
+end
+
 -- Reset the controller independently of its queue/entity/renderings.
 ---@param data PlayerMoveData
 ---@param preserve_mode? boolean
 function PlayerData.reset_movement_state(data, preserve_mode)
   data.current_waypoint = 1
+  data.waypoint_motion = nil
+  data.waypoint_scan_pending = nil
+  data.character_arrival = nil
   data.is_auto_walking = nil
   data.stuck_counter = 0
   data.last_position = nil
@@ -115,11 +148,13 @@ function PlayerData.migrate()
   storage.c2m_player_move_data = storage.c2m_player_move_data or {}
   player_move_data = storage.c2m_player_move_data
   for player_index, data in pairs(player_move_data) do
+    data.owner_index = player_index
     local player = game.players[player_index]
     local entity = data.move_entity
     if not player or not player.valid or not player.connected or not entity or not entity.valid
         or (entity.type ~= "character" and entity.type ~= "car" and entity.type ~= "spider-vehicle")
-        or not data.goals or #data.goals == 0 then
+        or not data.goals or #data.goals == 0 or not PlayerData.can_control_entity(player, entity)
+        or not PlayerData.check_route_surface(data, entity) then
       PlayerData.cleanup_movement(entity, data)
       PlayerData.remove(player_index)
     else
@@ -152,13 +187,17 @@ function PlayerData.ensure(player_index)
     PlayerData.reset_movement_state(data)
     player_move_data[player_index] = data
   end
+  data.owner_index = player_index
   return data
 end
 
 -- Release the actuator without changing goals, paths, or controller state.
 ---@param entity_to_move? LuaEntity
-function PlayerData.stop_input(entity_to_move)
+---@param data? PlayerMoveData
+function PlayerData.stop_input(entity_to_move, data)
   if entity_to_move and entity_to_move.valid then
+    if data and entity_to_move.type == "car"
+        and not PlayerData.can_control_entity(data.owner_index and game.players[data.owner_index], entity_to_move) then return end
     if entity_to_move.type == "character" then
       entity_to_move.walking_state = { walking = false, direction = defines.direction.north }
     elseif entity_to_move.type == "spider-vehicle" then
@@ -173,9 +212,10 @@ end
 ---@param entity_to_move? LuaEntity
 ---@param data PlayerMoveData
 function PlayerData.cleanup_movement(entity_to_move, data)
-  PlayerData.stop_input(entity_to_move)
+  PlayerData.stop_input(entity_to_move, data)
   Rendering.clear_player(data)
   data.move_entity = nil
+  data.route_surface_index = nil
   PlayerData.reset_movement_state(data)
 end
 

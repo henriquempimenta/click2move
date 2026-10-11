@@ -79,6 +79,7 @@ local function fixture(position, speed, goal_position)
     is_shortcut_toggled = function() return true end,
     set_shortcut_toggled = function() end, print = function() end
   }
+  vehicle.get_driver = function() return player end
   game.players[1] = player
   init()
   local data = PlayerData.ensure(1)

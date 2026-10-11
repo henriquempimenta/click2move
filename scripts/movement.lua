@@ -15,6 +15,15 @@ local Movement = {}
 -- Start braking with half a second of travel in hand. Keep control until both
 -- native speed and scripted movement have settled; hovercrafts can drift at speed 0.
 local VEHICLE_BRAKING_LOOKAHEAD = 30
+local function latch_character_arrival(data, character, goal, config, arrival_radius)
+  if data.character_arrival then return end
+  local lookahead = (character.character_running_speed or 0) * (config.update_interval or 1)
+    + arrival_radius + 1 / 64
+  if Util.distance_sq(character.position, goal.position) <= lookahead ^ 2 then
+    data.character_arrival = true
+  end
+end
+
 local function brake_at_goal(data, vehicle, goal, config)
   local arrival = data.vehicle_arrival
   local speed = vehicle.speed
@@ -41,6 +50,7 @@ local function brake_at_goal(data, vehicle, goal, config)
   -- Braking distance varies by vehicle/mod. If we stopped short or overshot,
   -- approach again from rest instead of finishing away from the destination.
   data.vehicle_arrival = nil
+  Navigation.reset_waypoint_motion(data)
   data.vehicle_reapproach = true
   PlayerData.notify_changed()
   data.closest_dist_to_goal = math.huge
@@ -87,19 +97,27 @@ function Movement.handle_straight_line(player_index, data, player, request_paths
   local character = data.move_entity
   local goal = data.goals[1]
   local changed_gui = false
+  Navigation.reset_waypoint_motion(data)
 
   if not character or not character.valid or not goal then return true, false end
   if character.type ~= "character" or not PlayerData.is_bypassing_pathfinding(player) then
     data.is_straight_line_move = nil
     PlayerData.reset_movement_state(data)
-    PlayerData.stop_input(character)
+    PlayerData.stop_input(character, data)
     Pathfinding.invalidate_goal(player_index)
     changed_gui = request_paths_fn(player_index, true)
     return false, changed_gui
   end
 
   local dist_sq_to_goal = Util.distance_sq(character.position, goal.position)
-  local threshold_sq = config.proximity_threshold ^ 2
+  local arrival_radius = config.proximity_threshold + (character.character_running_speed or 0) * 1.5
+  local threshold_sq = arrival_radius ^ 2
+  local was_arriving = data.character_arrival
+  latch_character_arrival(data, character, goal, config, arrival_radius)
+  if was_arriving ~= data.character_arrival then PlayerData.notify_changed() end
+  if dist_sq_to_goal < threshold_sq then
+    return true, changed_gui
+  end
 
   local elapsed = data.last_straight_line_tick and game.tick - data.last_straight_line_tick or 0
   data.last_straight_line_tick = game.tick
@@ -107,16 +125,14 @@ function Movement.handle_straight_line(player_index, data, player, request_paths
     data.stuck_counter = data.stuck_counter + elapsed
   else
     data.stuck_counter = 0
+    -- Retain the anchor until cumulative travel is meaningful. Per-tick final
+    -- checks must not turn steady slow movement into an apparent obstruction.
+    data.last_position = { x = character.position.x, y = character.position.y }
   end
   if data.stuck_counter > config.stuck_threshold then
     if Config.is_debug(player_index, "stuck") then player.print("Click2Move: Straight-line movement stopped (stuck).") end
     data.goal_failed = true
     return true, changed_gui
-  end
-  data.last_position = { x = character.position.x, y = character.position.y }
-
-  if dist_sq_to_goal < threshold_sq then
-    return true, changed_gui  -- Arrived
   end
 
   -- Move
@@ -153,11 +169,13 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
 
   -- Arrival bypasses stuck recovery: braking and sideways drift are not a jam.
   if data.vehicle_arrival then
+    Navigation.reset_waypoint_motion(data)
     return brake_at_goal(data, vehicle, goal, config)
   end
 
   -- Continue a timed reverse maneuver while recovering from an obstruction.
   if data.stuck_state == "reversing" then
+    Navigation.reset_waypoint_motion(data)
     local elapsed = game.tick - (data.last_recovery_tick or game.tick)
     data.last_recovery_tick = game.tick
     data.stuck_timer = data.stuck_timer - elapsed
@@ -182,20 +200,20 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
     return false -- Consume tick, don't do normal movement
   end
 
-  -- Standard validation
   if not goal.path or #goal.path == 0 then return true end
-  data.current_waypoint = math.min(data.current_waypoint, #goal.path)
-  local waypoint = goal.path[data.current_waypoint]
-  if not waypoint or not waypoint.position then return true end
-
   local speed = math.abs(vehicle.speed or 0)
   local dynamic_threshold_sq = (config.vehicle_proximity_threshold + speed * 3.0) ^ 2
-  if data.current_waypoint < #goal.path
-      and Navigation.advance_waypoint(data, vehicle.position, waypoint.position, dynamic_threshold_sq) then
+  local was_pending = data.waypoint_scan_pending
+  local advanced, pending = Navigation.advance_waypoints(data, vehicle, goal.path, dynamic_threshold_sq, game.tick)
+  if was_pending ~= data.waypoint_scan_pending then PlayerData.notify_changed() end
+  if advanced > 0 then
     data.closest_dist_to_goal = math.huge
     data.no_progress_ticks = 0
-    waypoint = goal.path[data.current_waypoint]
+    data.last_progress_tick = game.tick
   end
+  if pending then PlayerData.stop_input(vehicle, data); return false end
+  local waypoint = goal.path[data.current_waypoint]
+  if not waypoint or not waypoint.position then return true end
 
   local target_pos = waypoint.position
   if data.current_waypoint == #goal.path then
@@ -208,6 +226,7 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
       braking_distance = math.max(config.vehicle_proximity_threshold, braking_distance)
     end
     if Util.distance_sq(vehicle.position, goal.position) <= braking_distance ^ 2 then
+      Navigation.reset_waypoint_motion(data)
       data.vehicle_arrival = {
         position = {x = vehicle.position.x, y = vehicle.position.y},
         tick = game.tick,
@@ -229,6 +248,7 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
       data.goal_failed = true
       return true
     end
+    Navigation.reset_waypoint_motion(data)
     data.last_recovery_tick = game.tick
     data.stuck_state = "reversing"
     data.stuck_timer = 60
@@ -255,6 +275,8 @@ function Movement.handle_character(player_index, data, player, character)
 
   -- Continue a timed slide maneuver while recovering from an obstruction.
   if data.stuck_state == "sliding" then
+    Navigation.reset_waypoint_motion(data)
+    data.character_arrival = nil
     local elapsed = game.tick - (data.last_recovery_tick or game.tick)
     data.last_recovery_tick = game.tick
     data.stuck_timer = data.stuck_timer - elapsed
@@ -278,11 +300,35 @@ function Movement.handle_character(player_index, data, player, character)
   local goal = data.goals[1]
   if not goal or not goal.path then return true end
 
+  if #goal.path == 0 then return true end
+  local speed_per_tick = character.character_running_speed or 0
+  local dynamic_threshold_sq = (config.proximity_threshold + speed_per_tick * 1.5) ^ 2
+  local was_pending, was_arriving = data.waypoint_scan_pending, data.character_arrival
+  local advanced, pending = Navigation.advance_waypoints(data, character, goal.path, dynamic_threshold_sq, game.tick)
+  local at_final = data.current_waypoint == #goal.path
+  if not at_final then
+    data.character_arrival = nil
+  else
+    latch_character_arrival(data, character, goal, config, config.proximity_threshold + speed_per_tick * 1.5)
+  end
+  if was_pending ~= data.waypoint_scan_pending or was_arriving ~= data.character_arrival then
+    PlayerData.notify_changed()
+  end
+  if advanced > 0 then
+    data.closest_dist_to_goal = math.huge
+    data.no_progress_ticks = 0
+    data.last_progress_tick = game.tick
+  end
+  if pending then PlayerData.stop_input(character, data); return false end
   local waypoint = goal.path[data.current_waypoint]
-  if not waypoint or not waypoint.position then return true end  -- Invalid, stop
+  if not waypoint or not waypoint.position then return true end
+  local target_pos = at_final and goal.position or waypoint.position
+  if at_final and Util.distance_sq(character.position, goal.position) < dynamic_threshold_sq then
+    return true
+  end
 
   -- Stuck detection
-  local target_for_stuck_check = waypoint.position
+  local target_for_stuck_check = target_pos
   if Movement.check_progress_and_stuck(data, character.position, target_for_stuck_check, player_index) then
     if Config.is_debug(player_index, "stuck") then player.print("Click2Move: Character stuck; initiating slide.") end
     
@@ -291,6 +337,8 @@ function Movement.handle_character(player_index, data, player, character)
       data.goal_failed = true
       return true
     end
+    Navigation.reset_waypoint_motion(data)
+    data.character_arrival = nil
     data.last_recovery_tick = game.tick
     data.stuck_state = "sliding"
     data.stuck_timer = 30 -- slide for half a second
@@ -304,25 +352,7 @@ function Movement.handle_character(player_index, data, player, character)
     PlayerData.notify_changed()
     return false
   end
-  -- Dynamic threshold
-  local speed_per_tick = character.character_running_speed or 0
-  local dynamic_threshold_sq = (config.proximity_threshold + speed_per_tick * 1.5) ^ 2
-  
-  if Navigation.advance_waypoint(data, character.position, waypoint.position, dynamic_threshold_sq) then
-      -- Reset stuck tracker on waypoint advance
-      data.closest_dist_to_goal = math.huge
-  end
-
-  if data.current_waypoint > #goal.path then
-    return true  -- Arrived
-  end
-
-  waypoint = goal.path[data.current_waypoint]
-  if waypoint and waypoint.position then
-    Navigation.set_character_walking(character, waypoint.position)
-  else
-    return true  -- Invalid waypoint
-  end
+  Navigation.set_character_walking(character, target_pos)
 
   return false  -- Continue
 end
@@ -334,7 +364,7 @@ end
 ---@return boolean
 function Movement.cleanup_and_next_goal(player_index, data, entity_to_move)
   local failed = data.goal_failed
-  PlayerData.stop_input(entity_to_move)
+  PlayerData.stop_input(entity_to_move, data)
   Pathfinding.remove_goal(player_index, 1, not failed)
   if #data.goals == 0 then PlayerData.remove(player_index) end
   PlayerData.notify_changed()

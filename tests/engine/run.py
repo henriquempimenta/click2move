@@ -47,12 +47,19 @@ def run(command, log_path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--factorio", type=Path, required=True)
-    parser.add_argument("--hovercraft", type=Path, required=True)
+    parser.add_argument("--hovercraft", type=Path)
+    parser.add_argument("--waypoints", action="store_true", help="Run native character/exoskeleton and car waypoint checks")
+    parser.add_argument("--space-age", action="store_true", help="Enable Space Age and include native powered mech armor flight")
     args = parser.parse_args()
     factorio = args.factorio.resolve()
     data = factorio.parents[2] / "data"
     workspace = Path(tempfile.mkdtemp(prefix="c2m-native-"))
     print(f"Native test workspace: {workspace}", flush=True)
+    if args.waypoints:
+        run_waypoints(factorio, data, workspace, args.space_age)
+        return
+    if args.hovercraft is None:
+        parser.error("--hovercraft is required unless --waypoints is selected")
     for mode in ("new", "off", "old", "low-latency", "low-latency-b"):
         root = workspace / mode
         mods = root / "mods"
@@ -85,7 +92,8 @@ end})
         (defaults / "settings-updates.lua").write_text(
             f'data.raw["string-setting"]["hovercraft-drifting"].default_value = "{mode}"\n')
         (mods / "mod-list.json").write_text(json.dumps({"mods": [{"name": name, "enabled": True}
-            for name in ("base", "Hovercrafts", "click2move", "c2m-engine-settings")]}))
+            for name in ("base", "Hovercrafts", "click2move", "c2m-engine-settings")]
+            + expansion_mods(args.space_age)}))
         write_data = root / "userdata"
         write_data.mkdir()
         config = root / "config.ini"
@@ -112,6 +120,46 @@ end})
                 raise RuntimeError(f"Configuration migration assertions failed; see {root / 'migration.log'}")
             print("PASS configuration migration preserves saved route and mocked disabled preference", flush=True)
     print("PASS 60 native Hovercraft stopping scenarios, five save/load checks and configuration migration", flush=True)
+
+
+def expansion_mods(enabled):
+    # Official expansion mods default to enabled when omitted. Be explicit so
+    # the base-only suite also verifies the mod's declared base dependency.
+    return [{"name": name, "enabled": enabled}
+            for name in ("space-age", "quality", "elevated-rails", "recycler")]
+
+
+def run_waypoints(factorio, data, workspace, space_age):
+    for interval in (1, 10, 60):
+        root = workspace / str(interval)
+        mods = root / "mods"
+        mod = mods / "click2move"
+        mod.mkdir(parents=True)
+        for name in package_files(ROOT):
+            target = mod / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / name, target)
+        control = mod / "control.lua"
+        fixture = (ROOT / "tests/engine/waypoints.lua").read_text()
+        control.write_text(SHIM + f"\nlocal C2M_NATIVE_INTERVAL = {interval}\n"
+            + f"local C2M_NATIVE_WITH_SPACE_AGE = {str(space_age).lower()}\n"
+            + control.read_text() + "\n" + fixture)
+        (mods / "mod-list.json").write_text(json.dumps({"mods": [
+            {"name": "base", "enabled": True}, {"name": "click2move", "enabled": True}]
+            + expansion_mods(space_age)}))
+        write_data = root / "userdata"
+        write_data.mkdir()
+        config = root / "config.ini"
+        config.write_text(f"[path]\nread-data={data}\nwrite-data={write_data}\n[other]\ncheck-updates=false\n")
+        common = [str(factorio), "--config", str(config), "--mod-directory", str(mods)]
+        save = root / "fixture.zip"
+        run(common + ["--create", str(save), "--map-gen-seed", "1"], root / "create.log")
+        output = run(common + ["--benchmark", str(save), "--benchmark-ticks", "3600", "--benchmark-runs", "1"], root / "reload.log")
+        cases = 7 if space_age else 6
+        if f"C2M_NATIVE_WAYPOINTS_OK {cases} interval={interval}" not in output:
+            raise RuntimeError(f"Missing native waypoint assertions; see {root / 'reload.log'}")
+        print(f"PASS interval {interval}: {cases} native waypoint/arrival cases, Space Age={space_age}", flush=True)
+    print(f"PASS {cases * 3} native waypoint scenarios across intervals 1, 10 and 60", flush=True)
 
 
 if __name__ == "__main__":

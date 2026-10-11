@@ -30,6 +30,10 @@ local function fixture(goals)
   package.loaded["scripts/player-data"] = {
     MAX_PATH_RETRIES = 5, PATH_RETRY_DELAY_TICKS = 60,
     get_all = function() reads = reads + 1; return all end,
+    check_route_surface = function(d, e)
+      return d.route_surface_index == nil or d.route_surface_index == e.surface.index
+    end,
+    can_control_entity = function() return true end,
     reset_movement_state = function(d) d.current_waypoint = 1; d.stuck_state = "none"; d.stuck_timer = 0 end,
     stop_input = function(e) if e and e.valid then e.walking_state = {walking = false} end end,
     cleanup_movement = function(e, d) if e.valid then e.walking_state = {walking = false} end; Rendering.destroy_paths(d) end,
