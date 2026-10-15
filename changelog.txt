@@ -1,4 +1,17 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.1.15
+Date: 2026-10-15
+  Features:
+    - Add a per-player "Disable on arrival" setting that turns Click2Move mode off after the last queued destination is reached.
+    - Draw routes and numbered destinations on the map when remote view is zoomed out.
+  Changes:
+    - Spidertrons finish where their autopilot stops instead of within the vehicle proximity radius, and a spidertron remote command now takes over from Click2Move.
+    - Detect flight from any armor that provides flight instead of only the base mech armor.
+    - Translate the "No path found" message.
+  Bugfixes:
+    - Preserve newer Spidertron destinations and follow orders during route completion, cancellation, disconnect cleanup, and upgrades from older saves.
+    - Rebuild destination markers for active flying routes when updating the mod.
+---------------------------------------------------------------------------------------------------
 Version: 0.1.14
 Date: 2026-10-11
   Features:

@@ -2,20 +2,7 @@
 -- The fake engine releases input each tick and has no passive friction.
 package.path = "./?.lua;" .. package.path
 
-defines = {
-  riding = {
-    acceleration = {nothing = 0, accelerating = 1, braking = 2, reversing = 3},
-    direction = {straight = 0, left = 1, right = 2}
-  },
-  direction = {north = 0},
-  controllers = {character = 1, remote = 2},
-  gui_type = {none = 0},
-  events = {
-    on_tick = 1, on_script_path_request_finished = 2, on_gui_click = 3,
-    on_lua_shortcut = 4, on_player_created = 5, on_runtime_mod_setting_changed = 6,
-    on_player_driving_changed_state = 7
-  }
-}
+defines = dofile("tests/support/fake-factorio.lua").defines()
 local acceleration = defines.riding.acceleration
 local direction = defines.riding.direction
 local config = {vehicle_proximity_threshold = 6, stuck_threshold = 30, update_interval = 1}

@@ -9,11 +9,13 @@ local Config = {}
 ---@field stuck_threshold number
 ---@field vehicle_path_margin number
 ---@field vehicle_prefer_straight_paths boolean
+---@field disable_on_arrival boolean
 
 local defaults = {
   character_margin = 0.45, proximity_threshold = 1.5,
   vehicle_proximity_threshold = 6.0, stuck_threshold = 30,
-  vehicle_path_margin = 2.0, vehicle_prefer_straight_paths = false
+  vehicle_path_margin = 2.0, vehicle_prefer_straight_paths = false,
+  disable_on_arrival = false
 }
 local setting_names = {
   character_margin = "c2m-character-margin",
@@ -21,7 +23,8 @@ local setting_names = {
   vehicle_proximity_threshold = "c2m-vehicle-proximity-threshold",
   stuck_threshold = "c2m-stuck-threshold",
   vehicle_path_margin = "c2m-vehicle-path-margin",
-  vehicle_prefer_straight_paths = "c2m-vehicle-prefer-straight-paths"
+  vehicle_prefer_straight_paths = "c2m-vehicle-prefer-straight-paths",
+  disable_on_arrival = "c2m-disable-on-arrival"
 }
 local update_interval = 1
 local player_configs = {}

@@ -196,7 +196,7 @@ test("flying queues keep markers without native requests and resume after landin
   data.is_straight_line_move = true
   Pathfinding.request_paths_for_player(1, true)
   equal(#submitted, 0)
-  equal(#rendered, 9)
+  equal(#rendered, 12)
   Pathfinding.remove_goal(1, 1, true)
   equal(#submitted, 0)
   data.is_straight_line_move = nil
@@ -204,7 +204,7 @@ test("flying queues keep markers without native requests and resume after landin
   equal(#submitted, 2)
 end)
 
-test("100 route responses create each persistent segment once and keep the physical surface", function()
+test("100 route responses create each persistent segment once, merge map lines and keep the physical surface", function()
   local data = fixture(100)
   player.surface = {index = 2}
   Rendering.render_paths_for_player(1, all)
@@ -213,18 +213,34 @@ test("100 route responses create each persistent segment once and keep the physi
     for j = 0, 100 do goal.path[#goal.path + 1] = {position = {x = (i - 1) * 100 + j, y = 0}} end
     Rendering.render_goal(1, data, goal, i)
   end
-  equal(#rendered, 10300)
+  equal(#rendered, 10500)
   equal(destroyed, 0)
+  -- Map view gets one merged line and one zoom-scaled number per straight goal.
+  local chart_lines, chart_numbers = 0, 0
+  for _, object in ipairs(rendered) do
+    if object.options.render_mode == "chart" then
+      if object.options.text then
+        chart_numbers = chart_numbers + 1
+        equal(object.options.scale_with_zoom, true)
+      else
+        chart_lines = chart_lines + 1
+        equal(object.options.to.x - object.options.from.x, 100)
+      end
+    end
+  end
+  equal(chart_lines, 100)
+  equal(chart_numbers, 100)
   for _, object in ipairs(rendered) do equal(object.options.surface, surface) end
   Rendering.render_paths_for_player(1, all)
-  equal(#rendered, 10300)
+  equal(#rendered, 10500)
   local removed = table.remove(data.goals, 1)
   Rendering.clear_goal(removed)
   Rendering.render_paths_for_player(1, all)
-  equal(data.goals[1].rendering.number.text, "1")
-  equal(#rendered, 10300)
+  equal(data.goals[1].rendering.numbers[1].text, "1")
+  equal(data.goals[1].rendering.numbers[2].text, "1")
+  equal(#rendered, 10500)
   Rendering.destroy_paths(data)
-  equal(destroyed, 10300)
+  equal(destroyed, 10500)
 end)
 
 print(count .. " pathfinding/rendering tests passed")

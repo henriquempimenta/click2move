@@ -17,8 +17,9 @@ def main():
     if not lua or not luac:
         sys.exit("Install Lua and luac (CI uses Lua 5.2) before running checks")
     tests = sorted(root.glob("tests/*.lua"))
+    support = sorted(root.glob("tests/support/*.lua"))
     runtime = [root / name for name in package_files(root) if name.endswith(".lua")]
-    for source in runtime + tests:
+    for source in runtime + support + tests:
         subprocess.run([luac, "-p", str(source)], cwd=root, check=True)
     print(f"Lua syntax passed for {len(runtime)} runtime files and {len(tests)} test scripts", flush=True)
     for test in tests:

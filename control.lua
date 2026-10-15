@@ -12,6 +12,7 @@ local Rendering = require("scripts/rendering")
 local GUI = require("scripts/gui")
 local Pathfinding = require("scripts/pathfinding")
 local Movement = require("scripts/movement")
+local Mode = require("scripts/mode")
 
 PlayerData.set_cancel_handler(Pathfinding.cancel_player)
 
@@ -23,7 +24,7 @@ local function needs_continuous_updates(data)
   local entity = data.move_entity
   local goal = data.goals and data.goals[1]
   return entity and entity.valid and (data.stuck_state == "sliding" or data.stuck_state == "reversing"
-    or data.character_arrival or data.waypoint_scan_pending
+    or data.character_arrival or data.waypoint_scan_pending or entity.type == "spider-vehicle"
     or (entity.type == "car" and (data.vehicle_arrival ~= nil or (goal and not goal.path))))
 end
 
@@ -50,27 +51,15 @@ local function register_tick_handler()
   end
 end
 
-local function toggle_click2move_mode(player)
-  if not player or not player.valid then return end
-  local enabled = not player.is_shortcut_toggled("c2m-toggle-mode")
-  player.set_shortcut_toggled("c2m-toggle-mode", enabled)
-  if not enabled then
-    GUI.cancel_movement(player, "mode disabled")
-  end
-  if Config.is_debug(player.index, "queue") then
-    player.print("Click2Move: Mode " .. (enabled and "enabled." or "disabled."))
-  end
-end
-
 local function enable_click2move_mode(player)
   if player and player.valid then
-    player.set_shortcut_toggled("c2m-toggle-mode", true)
+    player.set_shortcut_toggled(Mode.SHORTCUT_NAME, true)
   end
 end
 
 local function on_lua_shortcut(event)
-  if event.prototype_name ~= "c2m-toggle-mode" then return end
-  toggle_click2move_mode(game.players[event.player_index])
+  if event.prototype_name ~= Mode.SHORTCUT_NAME then return end
+  Mode.toggle(game.players[event.player_index])
 end
 
 local function on_player_created(event)
@@ -114,11 +103,38 @@ local function on_player_driving_changed_state(event)
   end
 end
 
+local function on_spider_command_completed(event)
+  for _, data in pairs(PlayerData.get_all()) do
+    Movement.on_spider_command_completed(data, event.vehicle)
+  end
+end
+
+-- Remote commands are raised before the spider moves, so a route cannot later
+-- mistake the remote destination's completion for its own.
+local function on_player_used_spidertron_remote(event)
+  local remote_player = game.players[event.player_index]
+  local selection = remote_player and remote_player.valid and remote_player.spidertron_remote_selection or {}
+  for player_index, data in pairs(PlayerData.get_all()) do
+    local spider = data.move_entity
+    if spider and spider.valid and spider.type == "spider-vehicle" then
+      local selected = false
+      for _, entity in pairs(selection) do
+        if entity == spider then selected = true; break end
+      end
+      if selected or (data.spider_destination and not Movement.owns_spider_autopilot(data, spider)) then
+        GUI.cancel_movement(game.players[player_index], "spidertron remote", true)
+      end
+    end
+  end
+end
+
 local function register_override_handlers()
   for _, control in ipairs({"move-up", "move-down", "move-left", "move-right"}) do
     script.on_event("c2m-manual-" .. control, on_manual_movement)
   end
   script.on_event(defines.events.on_player_driving_changed_state, on_player_driving_changed_state)
+  script.on_event(defines.events.on_spider_command_completed, on_spider_command_completed)
+  script.on_event(defines.events.on_player_used_spidertron_remote, on_player_used_spidertron_remote)
 end
 
 -- Handles the custom input to initiate movement
@@ -130,7 +146,7 @@ local function on_custom_input(event)
     return
   end
   if event.input_name == "c2m-toggle-mode" then
-    toggle_click2move_mode(player)
+    Mode.toggle(player)
     return
   end
   if event.input_name ~= "c2m-move-command" and event.input_name ~= "c2m-move-command-queue" then return end
@@ -152,7 +168,7 @@ local function on_custom_input(event)
 
   -- Prevents the mod to be triggered when interacting with other GUIs, leading to unintentional movement.
   if player.opened_gui_type ~= defines.gui_type.none then return end
-  if not player.is_shortcut_toggled("c2m-toggle-mode") then
+  if not Mode.is_enabled(player) then
     if Config.is_debug(player.index, "queue") then player.print("Click2Move: Ignored movement click because mode is disabled.") end
     return
   end
@@ -185,6 +201,9 @@ local function on_custom_input(event)
     Rendering.render_paths_for_player(player.index, PlayerData.get_all())
   else
     Pathfinding.request_paths_for_player(player.index, true)
+  end
+  if entity_to_move.type == "spider-vehicle" and not data.spider_destination then
+    Movement.command_spider(data, entity_to_move)
   end
   PlayerData.notify_changed()
   GUI.update(player.index)
@@ -292,7 +311,12 @@ script.on_configuration_changed(function()
   Pathfinding.init()
   register_handlers()
   for player_index, data in pairs(PlayerData.get_all()) do
-    if not data.is_straight_line_move then Pathfinding.request_paths_for_player(player_index, true) end
+    if data.is_straight_line_move then
+      -- Flying routes have no paths to refresh but still need current markers.
+      Rendering.render_paths_for_player(player_index, PlayerData.get_all())
+    else
+      Pathfinding.request_paths_for_player(player_index, true)
+    end
   end
   for _, player in pairs(game.players) do GUI.update(player.index) end
 end)

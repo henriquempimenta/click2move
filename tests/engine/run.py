@@ -49,6 +49,7 @@ def main():
     parser.add_argument("--factorio", type=Path, required=True)
     parser.add_argument("--hovercraft", type=Path)
     parser.add_argument("--waypoints", action="store_true", help="Run native character/exoskeleton and car waypoint checks")
+    parser.add_argument("--spiders", action="store_true", help="Run native spidertron autopilot ownership checks")
     parser.add_argument("--space-age", action="store_true", help="Enable Space Age and include native powered mech armor flight")
     args = parser.parse_args()
     factorio = args.factorio.resolve()
@@ -57,6 +58,9 @@ def main():
     print(f"Native test workspace: {workspace}", flush=True)
     if args.waypoints:
         run_waypoints(factorio, data, workspace, args.space_age)
+        return
+    if args.spiders:
+        run_spiders(factorio, data, workspace)
         return
     if args.hovercraft is None:
         parser.error("--hovercraft is required unless --waypoints is selected")
@@ -160,6 +164,36 @@ def run_waypoints(factorio, data, workspace, space_age):
             raise RuntimeError(f"Missing native waypoint assertions; see {root / 'reload.log'}")
         print(f"PASS interval {interval}: {cases} native waypoint/arrival cases, Space Age={space_age}", flush=True)
     print(f"PASS {cases * 3} native waypoint scenarios across intervals 1, 10 and 60", flush=True)
+
+
+def run_spiders(factorio, data, workspace):
+    mods = workspace / "spiders" / "mods"
+    mod = mods / "click2move"
+    mod.mkdir(parents=True)
+    for name in package_files(ROOT):
+        target = mod / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, target)
+    control = mod / "control.lua"
+    control.write_text(control.read_text() + "\n" + (ROOT / "tests/engine/spiders.lua").read_text())
+    (mods / "mod-list.json").write_text(json.dumps({"mods": [
+        {"name": "base", "enabled": True}, {"name": "click2move", "enabled": True}] + expansion_mods(False)}))
+    root = mods.parent
+    write_data = root / "userdata"
+    write_data.mkdir()
+    config = root / "config.ini"
+    config.write_text(f"[path]\nread-data={data}\nwrite-data={write_data}\n[other]\ncheck-updates=false\n")
+    common = [str(factorio), "--config", str(config), "--mod-directory", str(mods)]
+    save = root / "fixture.zip"
+    run(common + ["--create", str(save), "--map-gen-seed", "1"], root / "create.log")
+    output = run(common + ["--benchmark", str(save), "--benchmark-ticks", "1900", "--benchmark-runs", "1"], root / "run.log")
+    if "C2M_NATIVE_SPIDERS_OK 9" not in output:
+        raise RuntimeError(f"Missing native spidertron assertions; see {root / 'run.log'}")
+    distance = output.split("max_completion_distance=")[1].split()[0]
+    foreign = output.split("foreign_at=")[1].split()[0]
+    speedup = output.split("speedup=")[1].split()[0]
+    print(f"PASS 9 native spidertron autopilot ownership scenarios (arrivals within {distance} tiles; "
+          f"foreign completion from x={foreign} rejected; exoskeleton speedup {speedup}x)", flush=True)
 
 
 if __name__ == "__main__":

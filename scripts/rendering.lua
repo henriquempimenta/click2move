@@ -1,6 +1,10 @@
--- Each queued goal owns its persistent markers and path segments.
+-- Each queued goal owns its persistent markers and path segments. Routes are
+-- drawn twice: "game" objects show in the world and close remote view, while
+-- "chart" objects show once remote view zooms out to the map.
 local Util = require("scripts/util")
 local Rendering = {}
+
+local RENDER_MODES = {"game", "chart"}
 
 local function copy_color(color, alpha)
   local source = color or {r = 0.1, g = 0.8, b = 0.1, a = 0.9}
@@ -21,11 +25,13 @@ function Rendering.draw_target_crosshair(player, position, color, surface)
   return objects
 end
 
-function Rendering.draw_goal_number(player, position, index, color, surface)
+function Rendering.draw_goal_number(player, position, index, color, surface, render_mode)
+  local chart = render_mode == "chart"
   return rendering.draw_text{
     text = tostring(index), color = copy_color(color or player.color, index == 1 and 1 or 0.65),
     target = position, surface = surface or player.surface, players = {player},
-    scale = 1.2, alignment = "center", vertical_alignment = "middle", time_to_live = 0
+    scale = chart and 1.5 or 1.2, scale_with_zoom = chart, render_mode = render_mode,
+    alignment = "center", vertical_alignment = "middle", time_to_live = 0
   }
 end
 
@@ -45,6 +51,21 @@ function Rendering.destroy_paths(data)
 end
 Rendering.clear_player = Rendering.destroy_paths
 
+-- The map is viewed zoomed out, so straight runs of waypoints become one line.
+local function merge_straight_runs(points)
+  local merged = {points[1]}
+  for index = 2, #points do
+    local a, b, c = merged[#merged - 1], merged[#merged], points[index]
+    local abx, aby, bcx, bcy = a and b.x - a.x, a and b.y - a.y, c.x - b.x, c.y - b.y
+    if a and math.abs(abx * bcy - aby * bcx) < 0.000001 and abx * bcx + aby * bcy > 0 then
+      merged[#merged] = c
+    else
+      merged[#merged + 1] = c
+    end
+  end
+  return merged
+end
+
 local function draw_path(player, data, goal, index, surface)
   local state = goal.rendering
   Util.safe_destroy_renderings(state.path_objects)
@@ -52,23 +73,27 @@ local function draw_path(player, data, goal, index, surface)
   state.path = goal.path
   local vehicle = data.move_entity and data.move_entity.type ~= "character"
   local color = copy_color(player.color, (vehicle and 0.5 or 0.9) * (index > 1 and 0.5 or 1))
-  local previous
+  local points = {}
   for _, waypoint in ipairs(goal.path or {}) do
-    if waypoint.position then
-      if previous then
-        state.path_objects[#state.path_objects + 1] = rendering.draw_line{
-          color = color, width = vehicle and 1 or 2, from = previous, to = waypoint.position,
-          surface = surface, players = {player}, time_to_live = 0
-        }
-      end
-      previous = waypoint.position
-    end
+    if waypoint.position then points[#points + 1] = waypoint.position end
   end
-  if goal.path and #goal.path == 1 and previous then
-    state.path_objects[#state.path_objects + 1] = rendering.draw_circle{
-      color = color, radius = 0.3, target = previous, surface = surface,
-      players = {player}, time_to_live = 0
-    }
+  if #points == 0 then return end
+  local polylines = {game = points, chart = merge_straight_runs(points)}
+  for _, render_mode in ipairs(RENDER_MODES) do
+    local polyline = polylines[render_mode]
+    for point = 2, #polyline do
+      state.path_objects[#state.path_objects + 1] = rendering.draw_line{
+        color = color, width = (vehicle and render_mode == "game") and 1 or 2,
+        from = polyline[point - 1], to = polyline[point], surface = surface, players = {player},
+        render_mode = render_mode, time_to_live = 0
+      }
+    end
+    if #goal.path == 1 then
+      state.path_objects[#state.path_objects + 1] = rendering.draw_circle{
+        color = color, radius = 0.3, target = points[1], surface = surface,
+        players = {player}, render_mode = render_mode, time_to_live = 0
+      }
+    end
   end
 end
 
@@ -78,20 +103,28 @@ function Rendering.render_goal(player_index, data, goal, index)
   local entity = data.move_entity
   local surface = entity and entity.valid and entity.surface or player.surface
   local state = goal.rendering
-  if state and (state.surface ~= surface or not state.number.valid) then
+  -- Saves from 0.1.14 and earlier have a single game-mode number and no map copy.
+  if state and (state.surface ~= surface or not state.numbers or not state.numbers[1].valid) then
     Rendering.clear_goal(goal)
     state = nil
   end
   if not state then
     local markers = Rendering.draw_target_crosshair(player, goal.position, player.color, surface)
-    local number = Rendering.draw_goal_number(player, goal.position, index, player.color, surface)
-    markers[#markers + 1] = number
-    state = {markers = markers, number = number, surface = surface, path_objects = {}}
+    local numbers = {}
+    for _, render_mode in ipairs(RENDER_MODES) do
+      numbers[#numbers + 1] = Rendering.draw_goal_number(player, goal.position, index, player.color, surface, render_mode)
+      markers[#markers + 1] = numbers[#numbers]
+    end
+    state = {markers = markers, numbers = numbers, surface = surface, path_objects = {}}
     goal.rendering = state
   end
   if state.index ~= index then
-    state.number.text = tostring(index)
-    state.number.color = copy_color(player.color, index == 1 and 1 or 0.65)
+    for _, number in ipairs(state.numbers) do
+      if number.valid then
+        number.text = tostring(index)
+        number.color = copy_color(player.color, index == 1 and 1 or 0.65)
+      end
+    end
     state.index = index
     for _, object in ipairs(state.path_objects) do
       if object.valid then

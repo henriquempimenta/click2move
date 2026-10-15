@@ -9,12 +9,21 @@ local PlayerData = require("scripts/player-data")
 local Navigation = require("scripts/navigation")
 local VehicleBraking = require("scripts/vehicle-braking")
 local Pathfinding = require("scripts/pathfinding")
+local Mode = require("scripts/mode")
+local GUI = require("scripts/gui")
 
 local Movement = {}
 
 -- Start braking with half a second of travel in hand. Keep control until both
 -- native speed and scripted movement have settled; hovercrafts can drift at speed 0.
 local VEHICLE_BRAKING_LOOKAHEAD = 30
+-- The native autopilot completes a destination once the spider is under two
+-- tiles from it, measured after that tick's movement, for any speed or spider
+-- size. tests/engine/spiders.lua checks every native arrival against this.
+Movement.SPIDER_ARRIVAL_RADIUS = 2
+-- Position quantization (1/256 tile) between our arithmetic and the engine's.
+local SPIDER_ARRIVAL_EPSILON = 1 / 256
+
 local function latch_character_arrival(data, character, goal, config, arrival_radius)
   if data.character_arrival then return end
   local lookahead = (character.character_running_speed or 0) * (config.update_interval or 1)
@@ -58,6 +67,41 @@ local function brake_at_goal(data, vehicle, goal, config)
   return false
 end
 
+-- The spider's own autopilot decides arrival and raises on_spider_command_completed.
+-- A destination already in reach completes in this tick's entity update, after
+-- the write, so the engine's stored (quantized) destination can be recorded.
+---@param data PlayerMoveData
+---@param spider LuaEntity
+function Movement.command_spider(data, spider)
+  local goal = data.goals[1]
+  if not goal or not goal.path then return end
+  data.spider_arrived = nil
+  -- Only reached for a new click or a command we still own; a click overrides a follow order.
+  spider.follow_target = nil
+  spider.autopilot_destination = goal.position
+  local stored = spider.autopilot_destination or goal.position
+  data.spider_destination = {x = stored.x, y = stored.y}
+end
+
+Movement.owns_spider_autopilot = PlayerData.owns_spider_autopilot
+
+-- on_spider_command_completed does not identify the command, so proximity
+-- alone cannot prove ownership. Accept it only with nothing queued behind it
+-- and with the spider inside the engine's own completion radius of our
+-- destination: then our command completes in this same update. Another
+-- command finishing farther away is rejected, and the next update cancels
+-- the route because the autopilot is no longer ours.
+---@param data PlayerMoveData
+---@param spider LuaEntity
+function Movement.on_spider_command_completed(data, spider)
+  if data.move_entity ~= spider or data.spider_arrived or not data.spider_destination then return end
+  if #spider.autopilot_destinations == 0 and not spider.follow_target
+      and Util.distance_sq(spider.position, data.spider_destination)
+        < (Movement.SPIDER_ARRIVAL_RADIUS + SPIDER_ARRIVAL_EPSILON) ^ 2 then
+    data.spider_arrived = true
+  end
+end
+
 -- Advanced stuck detection based on progress towards goal
 ---@param data PlayerMoveData
 ---@param current_pos MapPosition
@@ -69,8 +113,7 @@ function Movement.check_progress_and_stuck(data, current_pos, goal_pos, player_i
   data.last_progress_tick = game.tick
   local dist = Util.distance_sq(current_pos, goal_pos)
 
-  -- 2. Check if we made progress (with a small buffer to prevent jitter resetting it)
-  -- We use a buffer of 0.5 tiles squared (~0.25) so tiny back-and-forth movements don't count as progress
+  -- A 0.25 squared-distance buffer keeps tiny back-and-forth movement from counting as progress.
   if dist < (data.closest_dist_to_goal - 0.25) then
     data.closest_dist_to_goal = dist
     data.no_progress_ticks = 0 -- Reset counter, we are moving forward
@@ -78,11 +121,8 @@ function Movement.check_progress_and_stuck(data, current_pos, goal_pos, player_i
     data.no_progress_ticks = data.no_progress_ticks + elapsed
   end
 
-  -- 3. Threshold check
-  -- If we haven't made a new "best distance" record in X ticks, we are stuck.
-  -- Allow twice the configured threshold before attempting recovery.
-  local stuck_limit = config.stuck_threshold * 2 
-  
+  -- Without a new best distance for twice the configured threshold, we are stuck.
+  local stuck_limit = config.stuck_threshold * 2
   return data.no_progress_ticks > stuck_limit
 end
 
@@ -147,23 +187,27 @@ end
 ---@param vehicle LuaEntity
 ---@return boolean
 function Movement.handle_vehicle(player_index, data, player, vehicle)
-  local config = Config.get(player_index)
-
   if vehicle.type == "spider-vehicle" then
-    local goal = data.goals[1]
-    if not goal then return true end
-
-    local threshold_sq = config.vehicle_proximity_threshold ^ 2
-    if Util.distance_sq(vehicle.position, goal.position) < threshold_sq then
-      vehicle.autopilot_destination = nil
-      return true
+    if not data.goals[1] then return true end
+    if not data.spider_destination then
+      if not PlayerData.reconcile_spider(data, vehicle) then
+        GUI.cancel_movement(player, "spider command replaced", true)
+      elseif not data.spider_destination then
+        Movement.command_spider(data, vehicle)
+      end
+      return false
     end
-
-    vehicle.autopilot_destination = goal.position
-
-    return false
+    -- Validate ownership before accepting arrival: another script may have
+    -- assigned a destination after our command finished.
+    if not Movement.owns_spider_autopilot(data, vehicle) then
+      -- A spidertron remote or another mod replaced the command; it now owns the spider.
+      GUI.cancel_movement(player, "spider command replaced", true)
+      return false
+    end
+    return data.spider_arrived == true
   end
 
+  local config = Config.get(player_index)
   local goal = data.goals[1]
   if not goal then return true end
 
@@ -179,7 +223,7 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
     local elapsed = game.tick - (data.last_recovery_tick or game.tick)
     data.last_recovery_tick = game.tick
     data.stuck_timer = data.stuck_timer - elapsed
-    
+
     -- Drive backwards and turn left hard to unwedge
     vehicle.riding_state = {
       acceleration = defines.riding.acceleration.reversing,
@@ -240,9 +284,9 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
   -- Recover if no progress has been made for the configured time.
   local target_for_stuck_check = target_pos
   if Movement.check_progress_and_stuck(data, vehicle.position, target_for_stuck_check, player_index) then
-    
+
     if Config.is_debug(player_index, "vehicle") then player.print("Click2Move: Vehicle stuck detected (No progress). Initiating Reverse.") end
-    
+
     goal.recovery_attempts = (goal.recovery_attempts or 0) + 1
     if goal.recovery_attempts > PlayerData.MAX_PATH_RETRIES then
       data.goal_failed = true
@@ -260,7 +304,7 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
 
   -- Move to current/next waypoint
   Navigation.set_vehicle_riding(vehicle, target_pos)
-  
+
   return false
 end
 
@@ -280,7 +324,7 @@ function Movement.handle_character(player_index, data, player, character)
     local elapsed = game.tick - (data.last_recovery_tick or game.tick)
     data.last_recovery_tick = game.tick
     data.stuck_timer = data.stuck_timer - elapsed
-    
+
     character.walking_state = { walking = true, direction = data.slide_direction }
 
     if data.stuck_timer <= 0 then
@@ -331,7 +375,7 @@ function Movement.handle_character(player_index, data, player, character)
   local target_for_stuck_check = target_pos
   if Movement.check_progress_and_stuck(data, character.position, target_for_stuck_check, player_index) then
     if Config.is_debug(player_index, "stuck") then player.print("Click2Move: Character stuck; initiating slide.") end
-    
+
     goal.recovery_attempts = (goal.recovery_attempts or 0) + 1
     if goal.recovery_attempts > PlayerData.MAX_PATH_RETRIES then
       data.goal_failed = true
@@ -343,7 +387,7 @@ function Movement.handle_character(player_index, data, player, character)
     data.stuck_state = "sliding"
     data.stuck_timer = 30 -- slide for half a second
     data.no_progress_ticks = 0
-    
+
     -- Alternate sides so repeated recovery tries both perpendicular directions.
     local dir = Navigation.get_character_direction(character.position, target_for_stuck_check) or defines.direction.north
     local offset = goal.recovery_attempts % 2 == 1 and 4 or 12
@@ -366,7 +410,13 @@ function Movement.cleanup_and_next_goal(player_index, data, entity_to_move)
   local failed = data.goal_failed
   PlayerData.stop_input(entity_to_move, data)
   Pathfinding.remove_goal(player_index, 1, not failed)
-  if #data.goals == 0 then PlayerData.remove(player_index) end
+  if #data.goals == 0 then
+    PlayerData.remove(player_index)
+    if not failed then Mode.on_route_arrived(game.players[player_index]) end
+  elseif entity_to_move.valid and entity_to_move.type == "spider-vehicle" then
+    -- Leave no idle gap in which a newer remote command could be overwritten.
+    Movement.command_spider(data, entity_to_move)
+  end
   PlayerData.notify_changed()
   return true
 end

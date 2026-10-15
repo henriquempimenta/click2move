@@ -285,7 +285,7 @@ function Pathfinding.on_path_request_finished(event)
       Pathfinding.remove_goal(player_index, goal_index, false)
     end
   else
-    player.print("Click2Move: No path found to " .. Util.format_pos(goal.position))
+    player.print({"click2move.no-path-found", Util.format_pos(goal.position)})
     Pathfinding.remove_goal(player_index, goal_index, false)
   end
   GUI.update(player_index)

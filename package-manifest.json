@@ -5,6 +5,7 @@
   "settings.lua",
   "scripts/config.lua",
   "scripts/gui.lua",
+  "scripts/mode.lua",
   "scripts/movement.lua",
   "scripts/navigation.lua",
   "scripts/pathfinding.lua",

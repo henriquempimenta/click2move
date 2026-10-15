@@ -94,5 +94,12 @@ data:extend({
     setting_type = "runtime-per-user",
     default_value = false,
     order = "h"
+  },
+  {
+    type = "bool-setting",
+    name = "c2m-disable-on-arrival",
+    setting_type = "runtime-per-user",
+    default_value = false,
+    order = "i"
   }
 })

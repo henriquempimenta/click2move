@@ -1,18 +1,9 @@
 -- Run from the mod directory: lua tests/waypoint-skipping.lua
 -- Positions below model observed engine motion. The actual production control,
 -- movement, navigation, path callback, cancellation and braking handlers run.
+local Fake = dofile("tests/support/fake-factorio.lua")
 local function equal(actual, expected, reason)
   assert(actual == expected, (reason or "values differ") .. ": " .. tostring(actual) .. " ~= " .. tostring(expected))
-end
-local function gui()
-  local parent = {}
-  parent.add = function(spec)
-    local child = gui(); child.valid = true
-    child.destroy = function() child.valid = false; parent[spec.name] = nil end
-    parent[spec.name] = child
-    return child
-  end
-  return parent
 end
 local function point(x, y) return {x = x, y = y or 0} end
 local function path(points)
@@ -30,7 +21,7 @@ local function engine(kind, interval, speed)
   local prototype = {collision_box = {left_top = point(-.2, -.2), right_bottom = point(.2, .2)}, collision_mask = {layers = {player = true}}}
   state.character = {valid = true, name = "character", type = "character", position = point(0), surface = state.surface,
     character_running_speed = speed or .5, prototype = prototype, walking_state = {walking = false, direction = 0}}
-  state.character.get_inventory = function() return {get_contents = function() return state.flying and {{name = "mech-armor"}} or {} end} end
+  state.character.get_inventory = Fake.armor_inventory(state)
   state.entity = state.character
   if state.kind ~= "character" then
     state.entity = {valid = true, name = state.kind == "hovercraft" and "hovercraft" or "car", type = "car",
@@ -39,68 +30,22 @@ local function engine(kind, interval, speed)
     state.driver = state.character
     state.entity.get_driver = function() return state.driver end
   end
-  state.player = {index = 1, valid = true, connected = true, character = state.character, surface = state.surface,
-    force = {name = "player"}, color = {r = .2, g = .8, b = .2}, gui = {top = gui()},
-    controller_type = 1, opened_gui_type = 0, print = function() end}
+  state.player = Fake.player(state, {character = state.character, surface = state.surface})
   if state.kind ~= "character" then state.player.vehicle, state.player.physical_vehicle = state.entity, state.entity end
-  state.player.is_shortcut_toggled = function() return state.enabled end
-  state.player.set_shortcut_toggled = function(_, value) state.enabled = value end
   state.global_settings = {["c2m-update-interval"] = {value = state.interval}}
-  state.player_settings = {
-    ["c2m-debug-mode"] = {value = false}, ["c2m-character-margin"] = {value = 0},
-    ["c2m-character-proximity-threshold"] = {value = .5}, ["c2m-vehicle-proximity-threshold"] = {value = 2},
-    ["c2m-stuck-threshold"] = {value = 120}, ["c2m-vehicle-path-margin"] = {value = 0},
-    ["c2m-vehicle-prefer-straight-paths"] = {value = false}
-  }
+  state.player_settings = Fake.player_settings({
+    ["c2m-character-margin"] = 0, ["c2m-character-proximity-threshold"] = .5,
+    ["c2m-vehicle-proximity-threshold"] = 2, ["c2m-stuck-threshold"] = 120, ["c2m-vehicle-path-margin"] = 0
+  })
   return state
 end
 local function vm(state)
-  local env = setmetatable({}, {__index = _G}); env._G = env
-  local loaded, runtime = {}, {env = env, events = {}, nth = {}, booting = true}
-  env.storage = state.storage
-  env.defines = {
-    direction = {north = 0, northeast = 2, east = 4, southeast = 6, south = 8, southwest = 10, west = 12, northwest = 14},
-    riding = {direction = {straight = 0, left = 1, right = 2}, acceleration = {nothing = 0, accelerating = 1, braking = 2, reversing = 3}},
-    controllers = {character = 1, remote = 2}, gui_type = {none = 0}, inventory = {character_armor = 1},
-    events = {on_tick = 1, on_script_path_request_finished = 2, on_gui_click = 3, on_lua_shortcut = 4,
-      on_player_created = 5, on_runtime_mod_setting_changed = 6, on_player_driving_changed_state = 7}
-  }
-  env.settings = {global = state.global_settings, startup = {}, get_player_settings = function() return state.player_settings end}
-  env.remote = {interfaces = {}}
-  env.game = {tick = state.tick, players = {[1] = state.player}}
-  env.script = {
-    on_event = function(event, handler) runtime.events[event] = handler end,
-    on_nth_tick = function(interval, handler) runtime.nth[interval] = handler end,
-    on_init = function(handler) runtime.init = handler end,
-    on_load = function(handler) runtime.load = handler end,
-    on_configuration_changed = function(handler) runtime.migrate = handler end
-  }
-  local function draw(spec)
-    local object = {valid = true, color = spec.color, text = spec.text}
-    object.destroy = function() object.valid = false end
-    return object
-  end
-  env.rendering = {draw_line = draw, draw_text = draw, draw_circle = draw}
-  env.require = function(name)
-    assert(runtime.booting, "runtime require is prohibited")
-    if not loaded[name] then loaded[name] = assert(loadfile(name:gsub("%.", "/") .. ".lua", "t", env))() end
-    return loaded[name]
-  end
-  env.require("control")
-  runtime.pd = env.require("scripts/player-data")
-  runtime.navigation = env.require("scripts/navigation")
-  runtime.movement = env.require("scripts/movement")
-  runtime.pathfinding = env.require("scripts/pathfinding")
-  runtime.command = function(position, queued)
-    local name = queued and "c2m-move-command-queue" or "c2m-move-command"
-    runtime.events[name]({player_index = 1, input_name = name, cursor_position = position})
-  end
+  local runtime = Fake.vm(state)
+  runtime.command = runtime.command_at
   runtime.result = function(id, points) runtime.events[2]({id = id, path = path(points)}) end
   runtime.tick = function(amount, position)
     if position then state.entity.position = point(position.x, position.y) end
-    state.tick = state.tick + (amount or state.interval); env.game.tick = state.tick
-    if runtime.events[1] then runtime.events[1]({tick = state.tick}) end
-    for interval, handler in pairs(runtime.nth) do if state.tick % interval == 0 then handler({tick = state.tick}) end end
+    runtime.advance(amount or state.interval)
   end
   runtime.route = function(points)
     runtime.command(points[#points])
@@ -108,7 +53,6 @@ local function vm(state)
     runtime.result(data.goals[1].path_id, points)
     return data
   end
-  runtime.booting = false
   return runtime
 end
 local function fixture(kind, interval, speed)
@@ -588,7 +532,7 @@ test("an old owner's callback preserves a new player's route, pending request an
     local old_request = old_data.goals[1].path_id
     local second = {}
     for key, value in pairs(state.player) do second[key] = value end
-    second.index = 2; second.object_name = "LuaPlayer"; second.gui = {top = gui()}
+    second.index = 2; second.object_name = "LuaPlayer"; second.gui = {top = Fake.gui()}
     second.character = {valid = true, type = "character", position = point(0), surface = state.surface}
     runtime.env.game.players[2] = second
     state.driver = second

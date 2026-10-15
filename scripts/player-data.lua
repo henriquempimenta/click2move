@@ -39,6 +39,8 @@ local PlayerData = {}
 ---@field stuck_timer uint32            -- Timer for the reverse maneuver
 ---@field slide_direction? defines.direction
 ---@field is_straight_line_move? boolean
+---@field spider_destination? MapPosition -- The current goal as sent to the spider autopilot
+---@field spider_arrived? boolean      -- on_spider_command_completed fired for that command
 
 -- Bind this reference to storage on init/load; local tables alone do not survive saves.
 ---@type table<uint32, PlayerMoveData>
@@ -126,6 +128,8 @@ function PlayerData.reset_movement_state(data, preserve_mode)
   data.stuck_state = "none"
   data.stuck_timer = 0
   data.slide_direction = nil
+  data.spider_destination = nil
+  data.spider_arrived = nil
   if not preserve_mode then data.is_straight_line_move = nil end
   -- Discard obsolete fields from saves made with older versions.
   data.vehicle_stuck_counter = nil
@@ -154,7 +158,8 @@ function PlayerData.migrate()
     if not player or not player.valid or not player.connected or not entity or not entity.valid
         or (entity.type ~= "character" and entity.type ~= "car" and entity.type ~= "spider-vehicle")
         or not data.goals or #data.goals == 0 or not PlayerData.can_control_entity(player, entity)
-        or not PlayerData.check_route_surface(data, entity) then
+        or not PlayerData.check_route_surface(data, entity)
+        or (entity.type == "spider-vehicle" and not PlayerData.reconcile_spider(data, entity)) then
       PlayerData.cleanup_movement(entity, data)
       PlayerData.remove(player_index)
     else
@@ -191,6 +196,42 @@ function PlayerData.ensure(player_index)
   return data
 end
 
+local SPIDER_DESTINATION_TOLERANCE = 0.1
+
+-- True while the autopilot follows only the destination Click2Move sent, or,
+-- once that command has finished, while nothing else has been assigned since.
+-- A follow order also leaves the destination queue empty, so it is foreign.
+-- Routes saved by 0.1.14 sent the current goal without recording it.
+---@param data PlayerMoveData
+---@param spider LuaEntity
+---@return boolean
+function PlayerData.owns_spider_autopilot(data, spider)
+  if spider.follow_target then return false end
+  local destinations = spider.autopilot_destinations
+  if data.spider_arrived then return data.spider_destination ~= nil and #destinations == 0 end
+  local legacy_goal = data.goals and data.goals[1]
+  local destination = data.spider_destination or (legacy_goal and legacy_goal.position)
+  if not destination or #destinations ~= 1 then return false end
+  local dx, dy = destinations[1].x - destination.x, destinations[1].y - destination.y
+  return dx * dx + dy * dy <= SPIDER_DESTINATION_TOLERANCE ^ 2
+end
+
+-- Before Click2Move writes to a spider without a recorded command (0.1.14 saves,
+-- or after input was released), adopt an autopilot still following our goal.
+-- Returns false when a remote, script or follow order now owns the spider.
+---@param data PlayerMoveData
+---@param spider LuaEntity
+---@return boolean
+function PlayerData.reconcile_spider(data, spider)
+  if data.spider_destination then return true end
+  if spider.follow_target then return false end
+  local destinations = spider.autopilot_destinations
+  if #destinations == 0 then return true end
+  if not PlayerData.owns_spider_autopilot(data, spider) then return false end
+  data.spider_destination = {x = destinations[1].x, y = destinations[1].y}
+  return true
+end
+
 -- Release the actuator without changing goals, paths, or controller state.
 ---@param entity_to_move? LuaEntity
 ---@param data? PlayerMoveData
@@ -201,7 +242,11 @@ function PlayerData.stop_input(entity_to_move, data)
     if entity_to_move.type == "character" then
       entity_to_move.walking_state = { walking = false, direction = defines.direction.north }
     elseif entity_to_move.type == "spider-vehicle" then
-      entity_to_move.autopilot_destination = nil
+      -- Like cars, never clear a command that a remote or another script assigned.
+      if not data or PlayerData.owns_spider_autopilot(data, entity_to_move) then
+        entity_to_move.autopilot_destination = nil
+      end
+      if data then data.spider_destination = nil end
     elseif entity_to_move.type == "car" then
       VehicleBraking.apply(entity_to_move)
     end
@@ -219,16 +264,15 @@ function PlayerData.cleanup_movement(entity_to_move, data)
   PlayerData.reset_movement_state(data)
 end
 
--- Check if the player is wearing "mech-armor"
+-- Check if the player is wearing armor that provides flight, such as mech armor
 ---@param player LuaPlayer
 ---@return boolean
 function PlayerData.is_wearing_mech(player)
   if not player or not player.character or not player.character.get_inventory then return false end
   local inventory = player.character.get_inventory(defines.inventory.character_armor)
-  if not inventory then return false end
-  local armor_inv = inventory.get_contents()
-  if not armor_inv or #armor_inv == 0 then return false end
-  return armor_inv[1].name == "mech-armor"
+  if not inventory or inventory.is_empty() then return false end
+  local armor = inventory[1]
+  return armor.valid_for_read and armor.prototype.provides_flight == true
 end
 
 -- Check if the player is currently jetpacking (requires jetpack mod)
