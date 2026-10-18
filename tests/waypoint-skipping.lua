@@ -160,7 +160,7 @@ test("character speed loss at the next sample cannot invalidate travel observed 
     state.entity.character_running_speed = .5
     if reload then
       runtime = vm(state); runtime.env.game = nil; runtime.load()
-      runtime.env.game = {tick = state.tick, players = {[1] = state.player}}
+      runtime.env.game = Fake.game(state)
     end
     runtime.tick(10, point(24))
     equal(data.current_waypoint, 4, "old valid speed must bound the preceding observed interval")
@@ -253,6 +253,251 @@ test("vehicle arrival radius cannot widen the corridor used as movement evidence
     "offset5 must remain outside the straight corridor even with radius6")
 end)
 
+test("a stationary vehicle cannot consume nearby unreached corners by proximity alone", function()
+  for _, kind in ipairs({"car", "hovercraft"}) do
+    -- Production defaults: radius6 and an update every tick. The route goes
+    -- around a wall at x=2; every corner is within six tiles of the start.
+    local state, runtime = fixture(kind, 1, 0)
+    state.player_settings["c2m-vehicle-proximity-threshold"].value = 6
+    state.player_settings["c2m-vehicle-path-margin"].value = 2
+    runtime.events[6]({setting = "c2m-vehicle-proximity-threshold", player_index = 1})
+    local data = runtime.route({point(0), point(0, 4), point(4, 4), point(4, 0), point(40)})
+    for _ = 1, 10 do runtime.tick(1, point(0)) end
+    equal(data.current_waypoint, 2, kind .. " skipped a corner it never reached")
+    equal(state.entity.riding_state.direction, 2, kind .. " must steer towards the first corner")
+    -- Near the corner the shortcut to the next node stays inside the path's
+    -- clearance, so the vehicle still turns early.
+    runtime.tick(1, point(0, 3.2))
+    equal(data.current_waypoint, 3, kind .. " must still turn early at a reached corner")
+  end
+end)
+
+test("a stationary character cannot consume a tight unreached corner by proximity alone", function()
+  local state, runtime = fixture("character", 1, .15)
+  state.player_settings["c2m-character-proximity-threshold"].value = 1.5
+  state.player_settings["c2m-character-margin"].value = .45
+  runtime.events[6]({setting = "c2m-character-proximity-threshold", player_index = 1})
+  local data = runtime.route({point(0), point(0, 1), point(1, 1), point(1, 0), point(40)})
+  for _ = 1, 10 do runtime.tick(1, point(0)) end
+  equal(data.current_waypoint, 2, "character skipped a corner it never reached")
+  equal(state.entity.walking_state.direction, 8, "character must walk towards the first corner")
+  runtime.tick(1, point(0, .7))
+  equal(data.current_waypoint, 3, "character must still advance at a reached corner")
+end)
+
+test("possible travel at long intervals is not progress past an unreached corner", function()
+  -- Factorio's detour round a single wall at (0.5, -59.5), with margin 0.
+  local route = {point(0, -59.5), point(-.5, -59.5), point(.5, -60.5), point(1.5, -59.5), point(2, -59.5)}
+  for _, interval in ipairs({1, 10, 60}) do
+    for _, speed in ipairs({.15, .6}) do
+      local state, runtime = fixture("character", interval, speed)
+      state.player_settings["c2m-character-proximity-threshold"].value = 1.5
+      runtime.events[6]({setting = "c2m-character-proximity-threshold", player_index = 1})
+      state.entity.position = route[1]
+      local data = runtime.route(route)
+      for _ = 1, 5 do runtime.tick(interval, route[1]) end
+      local name = "interval " .. interval .. " speed " .. speed
+      equal(data.current_waypoint, 2, name .. " consumed a corner it never reached")
+      equal(state.entity.walking_state.direction, 12, name .. " must walk towards the first corner")
+      if interval > 1 then
+        assert(data.corner_approach and runtime.events[1], name .. " must steer every tick near the corner")
+      end
+      runtime.tick(1, point(-.4, -59.45))
+      equal(data.current_waypoint, 3, name .. " must advance once the corner is reached")
+    end
+  end
+end)
+
+local function margin_setting(kind) return kind == "character" and "c2m-character-margin" or "c2m-vehicle-path-margin" end
+local function set_margin(state, runtime, kind, value)
+  state.player_settings[margin_setting(kind)].value = value
+  runtime.events[6]({setting = margin_setting(kind), player_index = 1})
+end
+
+test("a fast character stepping across a waypoint's tolerance every tick reaches it", function()
+  -- Five powered exoskeletons and +50%: 0.5625 tiles per tick. The remaining
+  -- x distance is inside the steering dead zone, so the character only moves
+  -- north and south, and neither position lands within the tolerance.
+  local a, b = point(2.359375, 111.734375), point(2.359375, 111.171875)
+  local route = {point(1.5, 111.5), point(2.5, 111.5), point(2.5, 109.5), point(2.5, 100)}
+  local state, runtime = fixture("character", 1, .5625)
+  state.entity.position = a
+  local data = runtime.route(route)
+  runtime.tick(1, a); equal(data.current_waypoint, 2)
+  equal(state.entity.walking_state.direction, 0, "the dead zone leaves only northward steering")
+  runtime.tick(1, b)
+  equal(data.current_waypoint, 3, "the observed step passed 0.14 tiles from the waypoint")
+  equal(state.entity.walking_state.direction, 0, "the character must continue to the next waypoint")
+end)
+
+test("character steering corrects every axis outside the dead zone in all quadrants", function()
+  local _, runtime = fixture("character", 1, .15)
+  local direction = runtime.navigation.get_character_direction
+  local d = {n = 0, ne = 2, e = 4, se = 6, s = 8, sw = 10, w = 12, nw = 14}
+  for _, case in ipairs({
+      {0, 0, nil}, {.15, .15, nil}, {-.15, .15, nil}, {.15, -.15, nil}, {-.15, -.15, nil},
+      {.1500001, 0, d.e}, {-.1500001, .15, d.w}, {0, .1500001, d.s}, {.15, -.1500001, d.n},
+      {.1500001, .1500001, d.se}, {-.1500001, .1500001, d.sw}, {.1500001, -.1500001, d.ne}, {-.1500001, -.1500001, d.nw},
+      -- The vertical error dominates, but the horizontal error still needs correcting.
+      {.504, .559, d.se}, {-.504, .559, d.sw}, {.504, -.559, d.ne}, {-.504, -.559, d.nw},
+      {.16, 10, d.se}, {.14, 10, d.s}, {10, .16, d.se}, {10, .14, d.e}}) do
+    -- From the origin, so the boundary offsets are exact.
+    equal(direction(point(0, 0), point(case[1], case[2])), case[3],
+      "direction for dx " .. case[1] .. " dy " .. case[2])
+  end
+end)
+
+test("a very fast character crossing a waypoint's line converges in every quadrant", function()
+  -- Five powered exoskeletons and a scripted +200%: 1.125 tiles per tick. The
+  -- vertical error stays slightly larger than the horizontal 0.504 tiles.
+  local waypoint, start = point(4.5, -181.5), point(3.99609375, -182.05859375)
+  local unit = {[0] = {0, -1}, [2] = {1, -1}, [4] = {1, 0}, [6] = {1, 1}, [8] = {0, 1}, [10] = {-1, 1}, [12] = {-1, 0}, [14] = {-1, -1}}
+  for _, sx in ipairs({1, -1}) do
+    for _, sy in ipairs({1, -1}) do
+      local function mirror(p) return point(waypoint.x + sx * (p.x - waypoint.x), waypoint.y + sy * (p.y - waypoint.y)) end
+      local route = {mirror(point(3, -181.5)), waypoint, mirror(point(4.5, -184)), mirror(point(4.5, -200))}
+      local state, runtime = fixture("character", 1, 1.125)
+      local position = mirror(start)
+      state.entity.position = position
+      local data = runtime.route(route)
+      local quadrant = "quadrant " .. sx .. "," .. sy
+      for tick = 1, 6 do
+        runtime.tick(1, position)
+        assert(data.stuck_state == "none", quadrant .. " entered recovery")
+        if data.current_waypoint >= 3 then break end
+        assert(tick < 6, quadrant .. " never reached the waypoint")
+        local walking = state.entity.walking_state
+        local v = unit[walking.direction]
+        local scale = walking.walking and 1.125 / math.sqrt(v[1] * v[1] + v[2] * v[2]) or 0
+        position = point(position.x + v[1] * scale, position.y + v[2] * scale)
+      end
+    end
+  end
+end)
+
+test("only a single observed tick of movement counts as passing through a waypoint", function()
+  local a, b = point(2.359375, 111.734375), point(2.359375, 111.171875)
+  local route = {point(1.5, 111.5), point(2.5, 111.5), point(2.5, 109.5), point(2.5, 100)}
+  for _, case in ipairs({{"standing still", 1, a}, {"a sample five ticks apart", 5, b}}) do
+    local state, runtime = fixture("character", 1, .5625)
+    state.entity.position = a
+    local data = runtime.route(route)
+    runtime.tick(1, a)
+    runtime.tick(case[2], case[3])
+    equal(data.current_waypoint, 2, case[1] .. " is not observed passage")
+  end
+end)
+
+test("a corner or the destination within one update's travel steers every tick from a straight waypoint", function()
+  -- 0.5625 tiles per tick: 5.6 tiles per update at interval 10.
+  local corner = {point(0), point(0, -1), point(0, -2), point(0, -3), point(2, -5), point(10, -5)}
+  local straight_run = {point(0), point(0, -1), point(0, -2), point(0, -3), point(0, -4), point(0, -40)}
+  local short_run = {point(0), point(0, -1), point(0, -2), point(0, -3)}
+  for _, case in ipairs({{"corner", corner, true}, {"destination", short_run, true}, {"straight run", straight_run, nil}}) do
+    local state, runtime = fixture("character", 10, .5625)
+    local data = runtime.route(case[2])
+    runtime.tick(10, point(0))
+    equal(data.current_waypoint, 2)
+    equal(data.corner_approach, case[3], case[1] .. " ahead of a straight waypoint")
+  end
+end)
+
+-- Instructions spent in one call, aborting runaway work.
+local function instructions(limit, body)
+  local count = 0
+  debug.sethook(function()
+    count = count + 1000
+    if count > limit then debug.sethook(); error("instruction budget exceeded: " .. count, 2) end
+  end, "", 1000)
+  local ok, err = pcall(body)
+  debug.sethook()
+  assert(ok, err)
+  return count
+end
+
+test("shortcut checks stay within a bounded work budget for every margin", function()
+  -- Ordinary pathfinder output: one-tile spacing round a corner.
+  local route = {}
+  for x = 0, 6 do route[#route + 1] = point(x) end
+  for y = 1, 6 do route[#route + 1] = point(6, y) end
+  route[#route + 1] = point(6, 40)
+  for _, kind in ipairs({"character", "car"}) do
+    for _, margin in ipairs({0, .000001, .001, kind == "character" and .45 or 2, 5}) do
+      local state, runtime = fixture(kind, 1, 0)
+      state.player_settings["c2m-vehicle-proximity-threshold"].value = 6
+      state.player_settings["c2m-character-proximity-threshold"].value = 1.5
+      set_margin(state, runtime, kind, margin)
+      local data = runtime.route(route)
+      local spent = instructions(400000, function() runtime.tick(1, point(0)) end)
+      assert(data.current_waypoint >= 2, kind .. " margin " .. margin .. " did not start the route")
+      if margin >= 2 then
+        assert(data.current_waypoint > 2, "default car clearance must still allow shortcuts within budget")
+      end
+      assert(spent <= 400000, kind .. " margin " .. margin .. " spent " .. spent .. " instructions")
+    end
+  end
+end)
+
+-- Stationary at the start, every node is a safe shortcut with two tiles of
+-- clearance, and none is with zero.
+local CLEARANCE_ROUTE = {point(0), point(0, .5), point(.5, .5), point(.5, 0), point(10)}
+
+test("a margin increase cannot widen the clearance of an existing or pending path", function()
+  for _, kind in ipairs({"character", "car"}) do
+    for _, pending in ipairs({false, true}) do
+      local state, runtime = fixture(kind, 1, 0)
+      state.player_settings["c2m-character-proximity-threshold"].value = 1.5
+      runtime.events[6]({setting = "c2m-character-proximity-threshold", player_index = 1})
+      runtime.command(CLEARANCE_ROUTE[#CLEARANCE_ROUTE])
+      local data = runtime.pd.get_all()[1]
+      if pending then set_margin(state, runtime, kind, 2) end
+      runtime.result(data.goals[1].path_id, CLEARANCE_ROUTE)
+      if not pending then set_margin(state, runtime, kind, 2) end
+      for _ = 1, 3 do runtime.tick(1, point(0)) end
+      local name = kind .. (pending and " with a pending request" or " with an existing path")
+      equal(data.goals[1].path_clearance, 0, name .. " lost the clearance it was requested with")
+      equal(data.current_waypoint, 2, name .. " used clearance the pathfinder never checked")
+      equal(state.next_path, 1, name .. " requested a replacement path")
+    end
+  end
+end)
+
+test("queued paths keep their own clearance across save/load", function()
+  local state, runtime = fixture("car", 1, 0)
+  runtime.command(point(10))
+  set_margin(state, runtime, "car", 2)
+  runtime.command(point(20), true)
+  local data = runtime.pd.get_all()[1]
+  runtime.result(data.goals[1].path_id, CLEARANCE_ROUTE)
+  runtime.result(data.goals[2].path_id, {point(10), point(20)})
+  equal(data.goals[1].path_clearance, 0); equal(data.goals[2].path_clearance, 2)
+  local reloaded = vm(state); reloaded.env.game = nil; reloaded.load()
+  reloaded.env.game = Fake.game(state)
+  local saved = reloaded.pd.get_all()[1]
+  equal(saved.goals[1].path_clearance, 0); equal(saved.goals[2].path_clearance, 2)
+  for _ = 1, 3 do reloaded.tick(1, point(0)) end
+  equal(saved.current_waypoint, 2, "a reloaded path used clearance it never had")
+end)
+
+test("migration replaces saved paths whose clearance is unknown", function()
+  for _, kind in ipairs({"character", "car"}) do
+    local state, runtime = fixture(kind, 1, 0)
+    runtime.command(point(10))
+    runtime.command(point(20), true)
+    local data = runtime.pd.get_all()[1]
+    runtime.result(data.goals[1].path_id, CLEARANCE_ROUTE)
+    runtime.result(data.goals[2].path_id, {point(10), point(20)})
+    -- 0.1.15 saves did not record clearance.
+    data.goals[1].path_clearance, data.goals[2].path_clearance = nil, nil
+    local requested = state.next_path
+    runtime.migrate()
+    equal(state.next_path, requested + 2, kind .. ": both saved paths must be requested again")
+    assert(not data.goals[1].path and not data.goals[2].path, kind .. " kept a path of unknown clearance")
+    runtime.result(data.goals[1].path_id, CLEARANCE_ROUTE)
+    equal(data.goals[1].path_clearance, 0)
+  end
+end)
+
 test("very long segments do not turn a real corner into an apparently negligible angle", function()
   local state, runtime = fixture("car", 60, 0)
   local data = runtime.route({point(0), point(1000000), point(2000000, .5), point(3000000, .5)})
@@ -323,7 +568,7 @@ test("powered mech flight completes queued final approaches at interval60 across
   runtime.tick(60, point(67.5))
   assert(data.character_arrival and runtime.events[1], "flight must check arrival before the next long update overshoots")
   runtime = vm(state); runtime.env.game = nil; runtime.load()
-  runtime.env.game = {tick = state.tick, players = {[1] = state.player}}
+  runtime.env.game = Fake.game(state)
   assert(runtime.events[1], "load must restore the flight arrival subscription")
   local completions = record_completions(runtime)
   local x = 67.5
@@ -673,7 +918,7 @@ test("fresh module load preserves valid history but stationary reload cannot fab
   runtime.tick(60, point(0))
   local reloaded = vm(state); reloaded.env.game = nil; reloaded.load()
   equal(reloaded.pd.get_all()[1].owner_index, 1, "fresh load must retain the persistent driver identity")
-  reloaded.env.game = {tick = state.tick, players = {[1] = state.player}}
+  reloaded.env.game = Fake.game(state)
   reloaded.tick(60, point(0)); equal(data.current_waypoint, 2)
   reloaded.tick(60, point(24)); equal(data.current_waypoint, 4)
 end)
@@ -740,7 +985,7 @@ test("load resumes a bounded character sweep and cancellation clears the retaine
   assert(data.waypoint_scan_pending and data.waypoint_motion.sweep_start)
   equal(state.entity.walking_state.walking, false)
   local reloaded = vm(state); reloaded.env.game = nil; reloaded.load()
-  reloaded.env.game = {tick = state.tick, players = {[1] = state.player}}
+  reloaded.env.game = Fake.game(state)
   assert(reloaded.events[1], "load must restore the pending scan subscription without accessing game")
   local iterations = 0
   while data.waypoint_scan_pending do

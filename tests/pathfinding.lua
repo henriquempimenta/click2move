@@ -1,5 +1,6 @@
 -- Run from the mod directory: lua tests/pathfinding.lua
 package.path = "./?.lua;" .. package.path
+local Fake = dofile("tests/support/fake-factorio.lua")
 local count = 0
 local function test(name, run)
   run()
@@ -23,7 +24,7 @@ local function fixture(goals)
     prototype = {collision_box = {left_top = {x = -.2, y = -.2}, right_bottom = {x = .2, y = .2}}, collision_mask = {layers = {}}}}
   player = {index = 1, valid = true, connected = true, character = entity, surface = surface,
     force = {name = "player"}, color = {r = 1, g = 1, b = 1}, print = function() end}
-  game = {tick = 0, players = {[1] = player}}
+  game = Fake.game({tick = 0, player = player})
   local data = {goals = {}, move_entity = entity, current_waypoint = 7, stuck_state = "sliding", stuck_timer = 12}
   for i = 1, goals or 2 do data.goals[i] = {position = {x = i * 100, y = 0}} end
   all[1] = data
@@ -58,6 +59,49 @@ end
 local function finish(id, start, goal)
   Pathfinding.on_path_request_finished({id = id, path = {{position = {x = start, y = 0}}, {position = {x = goal, y = 0}}}})
 end
+
+test("characters and cars request obstacle-safe paths directly regardless of their force", function()
+  local clean = {{position = {x = 0, y = 0}}, {position = {x = 50, y = 20}}, {position = {x = 100, y = 0}}}
+  for _, kind in ipairs({"character", "car"}) do
+    for _, force in ipairs({"player", "enemy", "custom"}) do
+      local data = fixture(1)
+      entity.type, entity.force, player.force = kind, {name = force}, {name = force}
+      Pathfinding.request_paths_for_player(1)
+      equal(submitted[1].force, "neutral")
+      equal(submitted[1].pathfind_flags.allow_destroy_friendly_entities, false)
+      equal(submitted[1].collision_mask, entity.prototype.collision_mask)
+      Pathfinding.on_path_request_finished({id = 1, path = clean})
+      equal(data.goals[1].path, clean)
+      equal(#submitted, 1)
+      equal(next(storage.c2m_path_requests), nil)
+    end
+  end
+end)
+
+test("destructive paths are rejected without another request, including results from older saves", function()
+  local through = {{position = {x = 0, y = 0}}, {position = {x = 50, y = 0}, needs_destroy_to_reach = true},
+    {position = {x = 100, y = 0}}}
+  for _, saved in ipairs({"current", "legacy"}) do
+    fixture(1)
+    local printed = {}
+    player.print = function(message) printed[#printed + 1] = message end
+    entity.walking_state = {walking = true}
+    Pathfinding.request_paths_for_player(1)
+    if saved == "legacy" then
+      storage.c2m_path_requests[1].params = {force = "player"}
+      package.loaded["scripts/pathfinding"] = nil
+      Pathfinding = require("scripts/pathfinding")
+      Pathfinding.load()
+    end
+    Pathfinding.on_path_request_finished({id = 1, path = through})
+    equal(#submitted, 1)
+    equal(all[1], nil)
+    equal(entity.walking_state.walking, false)
+    equal(next(storage.c2m_path_requests), nil)
+    equal(printed[1][1], "click2move.no-path-found")
+    equal(#printed, 1)
+  end
+end)
 
 test("failed first leg repaths its successor from the actual position and resets controller", function()
   local data = fixture()
@@ -105,6 +149,7 @@ end)
 test("busy retries dispatch exactly at their deadline and survive binding on load", function()
   local data = fixture(1)
   Pathfinding.request_paths_for_player(1)
+  equal(submitted[1].force, "neutral")
   Pathfinding.on_path_request_finished({id = 1, try_again_later = true})
   for tick = 1, 59 do game.tick = tick; Pathfinding.on_tick(tick) end
   equal(#submitted, 1)
@@ -114,6 +159,7 @@ test("busy retries dispatch exactly at their deadline and survive binding on loa
   game.tick = 60
   Pathfinding.on_tick(60)
   equal(#submitted, 2)
+  equal(submitted[2].force, "neutral")
   finish(2, 0, 100)
   assert(data.goals[1].path)
 end)
@@ -241,6 +287,17 @@ test("100 route responses create each persistent segment once, merge map lines a
   equal(#rendered, 10500)
   Rendering.destroy_paths(data)
   equal(destroyed, 10500)
+end)
+
+test("debug overlays ignore absent or invalid tracked entities", function()
+  fixture(1)
+  package.loaded["scripts/config"].get = function() return {debug_margins = true, debug_curve = true} end
+  local debug_rendering = require("scripts/debug-rendering")
+  local before = #rendered
+  debug_rendering.draw(player, {}, {path_clearance = 2}, {{x = 0, y = 0}}, surface, {})
+  local invalid = setmetatable({valid = false}, {__index = function(_, key) error("invalid entity read: " .. key) end})
+  debug_rendering.draw(player, {move_entity = invalid}, {path_clearance = 2}, {{x = 0, y = 0}}, surface, {})
+  equal(#rendered, before)
 end)
 
 print(count .. " pathfinding/rendering tests passed")

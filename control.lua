@@ -23,8 +23,9 @@ local registered_continuous_handler = false
 local function needs_continuous_updates(data)
   local entity = data.move_entity
   local goal = data.goals and data.goals[1]
+  if data.preview then return data.preview_braking ~= nil end
   return entity and entity.valid and (data.stuck_state == "sliding" or data.stuck_state == "reversing"
-    or data.character_arrival or data.waypoint_scan_pending or entity.type == "spider-vehicle"
+    or data.character_arrival or data.corner_approach or data.waypoint_scan_pending or entity.type == "spider-vehicle"
     or (entity.type == "car" and (data.vehicle_arrival ~= nil or (goal and not goal.path))))
 end
 
@@ -70,6 +71,33 @@ local function on_runtime_mod_setting_changed(event)
   Config.on_setting_changed(event)
   if event.setting == "c2m-update-interval" then
     register_tick_handler()
+  end
+  if event.player_index then
+    local data = PlayerData.get_all()[event.player_index]
+    if data then
+      local entity = data.move_entity
+      local player = game.players[event.player_index]
+      -- Settings can arrive before the next tick notices a destroyed actor or
+      -- a different driver. Never draw through invalid references or brake them.
+      if not entity or not entity.valid or not PlayerData.can_control_entity(player, entity)
+          or not PlayerData.check_route_surface(data, entity) then return end
+      if event.setting == "c2m-debug-preview" and Config.get(event.player_index).debug_preview then
+        data.preview = true
+        PlayerData.stop_input(data.move_entity, data)
+        PlayerData.reset_movement_state(data, true)
+        PlayerData.begin_preview_stop(data)
+      end
+      if data.preview and (event.setting == "c2m-character-margin" or event.setting == "c2m-vehicle-path-margin") then
+        -- Recalculate from the stationary actor; never widen a saved corridor.
+        Pathfinding.cancel_player(event.player_index, data)
+        for index in ipairs(data.goals) do Pathfinding.invalidate_goal(event.player_index, index) end
+        PlayerData.reset_movement_state(data, true)
+        Pathfinding.request_paths_for_player(event.player_index, true)
+      end
+      Rendering.render_paths_for_player(event.player_index, PlayerData.get_all())
+      GUI.update(event.player_index)
+      PlayerData.notify_changed()
+    end
   end
 end
 
@@ -175,7 +203,9 @@ local function on_custom_input(event)
 
   local data = PlayerData.ensure(player.index)
   local goal = {x = event.cursor_position.x, y = event.cursor_position.y}
+  local preview = Config.get(player.index).debug_preview
   local queue = event.input_name == "c2m-move-command-queue"
+    and (data.preview == true) == preview
     and data.move_entity == entity_to_move and #data.goals > 0
     and PlayerData.check_route_surface(data, entity_to_move)
 
@@ -187,6 +217,8 @@ local function on_custom_input(event)
   else
     table.insert(data.goals, {position = goal})
   end
+  data.preview = preview or nil
+  if data.preview then PlayerData.begin_preview_stop(data) end
   PlayerData.check_route_surface(data, entity_to_move)
   local straight_line = entity_to_move.type == "character" and PlayerData.is_bypassing_pathfinding(player)
   if straight_line ~= (data.is_straight_line_move == true) then
@@ -202,7 +234,7 @@ local function on_custom_input(event)
   else
     Pathfinding.request_paths_for_player(player.index, true)
   end
-  if entity_to_move.type == "spider-vehicle" and not data.spider_destination then
+  if not data.preview and entity_to_move.type == "spider-vehicle" and not data.spider_destination then
     Movement.command_spider(data, entity_to_move)
   end
   PlayerData.notify_changed()
@@ -236,6 +268,13 @@ on_tick = function(event, continuous_only)
       PlayerData.cleanup_movement(entity_to_move, data)
       PlayerData.remove(player_index)
       GUI.update(player_index)
+      goto continue_player_loop
+    end
+
+    -- A preview is latched to this route, including across setting changes and
+    -- save/load. Only a fresh movement command may start it.
+    if data.preview then
+      if PlayerData.update_preview_stop(data) then PlayerData.notify_changed() end
       goto continue_player_loop
     end
 
@@ -315,6 +354,14 @@ script.on_configuration_changed(function()
       -- Flying routes have no paths to refresh but still need current markers.
       Rendering.render_paths_for_player(player_index, PlayerData.get_all())
     else
+      -- Paths saved before 0.1.16 do not record their clearance. Replace them,
+      -- so shortcuts are judged against the corridor the pathfinder checked.
+      if data.move_entity.type ~= "spider-vehicle" then
+        for index = math.min(#data.goals, Pathfinding.PREFETCH_GOALS), 1, -1 do
+          local goal = data.goals[index]
+          if goal.path and goal.path_clearance == nil then Pathfinding.invalidate_goal(player_index, index) end
+        end
+      end
       Pathfinding.request_paths_for_player(player_index, true)
     end
   end

@@ -9,6 +9,8 @@ A quality-of-life mod that enables point-and-click movement for your character a
 *   **Waypoint Skipping**: Straight sections consume multiple waypoints already passed between updates, keeping fast characters with exoskeletons and vehicles moving toward the next target. Turns retain their normal proximity rule, and final destinations are checked separately.
 *   **Numbered Destinations**: Queued destinations are numbered on the map so the route order is visible at a glance.
 *   **Vehicle Support**: Control cars, tanks, and occupied spidertrons as well as your character. Spidertrons use their own autopilot and finish exactly where it stops.
+*   **Corner Speed**: Cars and tanks brake for rounded corners, heading corrections and the destination, forwards and in reverse. Steering and speed planning use the same route of straight sections and tangent arcs. Corners are taken on a racing line that uses both sides of the cleared corridor, and a lane shift round an obstacle becomes one wide curve; every curve is checked against the original path. A bounded refinement widens neighboring bends together, reduces peak and total bending, and lets the final curve reach the destination without imposing an unnecessary final heading. Gentle approach corrections use wider radii to avoid an extra braking cycle. Rounding stays within the path's recorded clearance after allowing for the rotated vehicle body and tracking error; zero or unknown clearance keeps explicit waypoint steering. Speed limits use each vehicle's braking force, weight, friction and turning rate, including the fuel's effect on braking and, for tanks, the fuel and powered exoskeletons' effect on turning. A vehicle outside its cleared corridor crawls back towards it, and fast cars reserve enough distance to brake before a turn.
+*   **Obstacle-Free Routes**: Routes are requested with the neutral force so the pathfinder treats rocks, trees and buildings as obstacles. If the returned route still requires destruction, the mod reports "No path found". Each leg uses one initial request; busy pathfinder responses can retry later.
 *   **Vehicle Braking**: Vehicles retain control at destinations until their speed and scripted drift settle before advancing the queue. If braking leaves a vehicle outside the arrival radius, it approaches farther inside and stops again.
 *   **Visual Path**: See the calculated path drawn on the ground, so you know exactly where you're headed. The route and numbered destinations also appear on the map when remote view is zoomed out.
 *   **Destination Marker**: A crosshair marks your final destination.
@@ -38,10 +40,16 @@ Giving a spidertron a command with a spidertron remote, or another mod assigning
 
 The default keybind can be changed in Factorio's control settings. Look for "**Click to Move**".
 
+## Inspecting margins and curves
+
+In **Settings → Mod settings → Per player**, enable **Debug: Draw Path Margins** and **Debug: Draw Smooth Curve**. They work independently of the chat debug switch. Yellow is the original path, cyan shows its recorded margin, orange shows the smaller allowance available for smoothing after reserving room for the rotated vehicle body and tracking error, and magenta is the exact steering reference. The margin outlines show allowed centerline deviation around the route, not obstacle boundaries or the vehicle's full swept footprint. Circular pieces are sampled only for drawing.
+
+Enable **Debug: Preview Without Moving**, then middle-click a destination to calculate its route without starting movement. A vehicle already moving brakes to a stop first. Change Character Margin or Vehicle Path Margin to recalculate the preview and compare the result. The GUI identifies paused previews; turning preview off keeps the displayed route paused until you click a fresh destination. Cancel clears the overlay. Queued previews calculate the first three paths, matching the normal prefetch window. Flight and spidertron routes have no pathfinder margin or car steering curve. Very large overlays are capped and display a notice when partial.
+
 ## Known Issues
 
 *   **Flickering with Mech Armor**: When moving horizontally with mech armor, the character sprite may flicker.
-*   **Vehicle Steering**: Steering can overshoot or oscillate, particularly around tight turns or with vehicles that have strong inertia.
+*   **Vehicle Steering**: Steering can overshoot or oscillate, particularly around tight turns or with vehicles that have strong inertia. At an update interval of 60 ticks a car holds one input for a whole second and can still circle tight corners or touch walls. Vehicles whose prototypes do not describe braking and turning, and scripted vehicles such as Hovercrafts in drift mode, are not slowed for corners as precisely.
 *   **Spidertron Remote View**: Ordering selected spidertrons from remote view is not supported yet. Remote-view clicks still control the player character or current vehicle.
 
 ## Mod Settings
@@ -52,6 +60,9 @@ You can adjust these settings in `Settings -> Mod settings`.
 | --------------------------------- | ------- | ----------------- | ------- | ------------------------------------------------------------------------------------------------------- |
 | **Debug mode**                    | `Bool`  | Per-Player        | `false` | Enables printing of debug messages to the console for your player.                                      |
 | **Debug: Pathfinding / Queue / Stuck Recovery / Vehicle Control** | `Bool` | Per-Player | `true` | Four separate filters for debug output. Only used when Debug mode is on.                        |
+| **Debug: Draw Path Margins**       | `Bool`  | Per-Player        | `false` | Draws the recorded margin and usable smoothing allowance with a color legend. |
+| **Debug: Draw Smooth Curve**       | `Bool`  | Per-Player        | `false` | Draws the vehicle's actual steering reference in magenta. |
+| **Debug: Preview Without Moving**  | `Bool`  | Per-Player        | `false` | Calculates paused routes; margin changes recalculate the preview. Independent of chat debug mode. |
 | **Character margin**              | `Float` | Per-Player        | `0.45`  | The safety margin added to the character's bounding box for pathfinding. Larger values avoid tighter gaps. |
 | **Update interval**               | `Int`   | Global            | `1`     | The number of game ticks between movement updates. Lower is smoother but uses more UPS.                 |
 | **Character proximity threshold** | `Float` | Per-Player        | `1.5`   | Base arrival radius in tiles for characters on ground paths or in flight; increases with running speed. |
@@ -61,7 +72,7 @@ You can adjust these settings in `Settings -> Mod settings`.
 | **Vehicle Prefer Straight Paths** | `Bool`  | Per-Player        | `false` | Asks Factorio's pathfinder to prefer straighter vehicle paths. Can be slower to compute.                |
 | **Disable on arrival**            | `Bool`  | Per-Player        | `false` | Turns Click2Move mode off after the last queued destination is reached.                                  |
 
-> **Note**: Settings can be changed on the fly. The global update interval re-registers the movement scheduler when changed. Characters on ground paths or in flight check arrival every tick once the destination is close enough to reach before the next scheduled update. Vehicles finishing a move keep applying their brakes every tick regardless of this interval.
+> **Note**: Settings can be changed on the fly. The global update interval re-registers the movement scheduler when changed. Characters on ground paths or in flight check arrival every tick once the destination is close enough to reach before the next scheduled update. Cars and characters also steer every tick while the next update could take them past a corner, or past a waypoint that straight-line movement cannot prove they passed, and vehicles while one update of turning could carry them past the heading they need. Margin settings apply to paths requested after the change. Vehicles finishing a move keep applying their brakes every tick regardless of this interval.
 
 Stuck recovery lasts 30 game ticks for a character slide and 60 game ticks for a vehicle reverse. These durations and the no-progress limit are independent of the update interval; a larger interval can delay detection until the next scheduled update.
 
@@ -102,13 +113,55 @@ python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --spiders
 
 It drives nine real spidertrons through the production handlers: a normal route; one with five exoskeletons that must measurably move faster; another mod assigning a destination or a follow order after a leg completes; another mod's command finishing 2.2–6 tiles from the goal; a takeover followed by a disconnect; and 0.1.14 routes whose autopilot is still theirs or has been replaced. It also checks that every real arrival lands inside the 2-tile completion radius Click2Move uses to recognise its own arrivals. Spidertron remote input cannot be simulated headlessly.
 
+Driving across generated Vulcanus terrain, with its cliffs, rocks, lava and trees, needs Space Age:
+
+```sh
+python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --vulcanus
+```
+
+A legendary car on legendary nuclear fuel drives between points about 80 tiles apart at 64 sites, one route at a time, at update intervals of 1 and 10 ticks. Most sites are cut off by lava or by rocks that would need destroying and are reported as unreachable. Every reachable route, at least eight, must arrive without damage, without a sudden loss of speed against a cliff and without stuck recovery.
+
+High-speed driving has its own native suite. It needs the quality mod, which ships with Space Age:
+
+```sh
+python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --fast-cars
+```
+
+Legendary cars on legendary nuclear fuel drive down 300- and 700-tile walled corridors that end in a right angle, a hairpin or an S-bend. A tank on legendary nuclear fuel and a car on coal take the right angle too. Further legendary cars start facing the closed end of a short corridor that leads the other way, north, north-west or south, and must turn slowly in the tight space without being taken for stuck, once at the default margin and once at a margin of 0. Every vehicle must arrive at update intervals of 1 and 10 ticks without touching a wall or entering stuck recovery. Each case also has a minimum peak speed and an arrival deadline based on earlier native measurements, so slowing every route to a crawl cannot pass the suite. The Vulcanus runner rejects incomplete summaries and requires at least eight reachable routes at each interval.
+
+Braking distances are measured natively against the planner's speed limits, without assuming a braking formula. It needs the quality mod:
+
+```sh
+python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --physics
+```
+
+Cars and tanks of normal and legendary quality, with and without nuclear fuel of the same quality, on frictionless, nearly frictionless and ordinary ground, brake from the planned limit for 100 and 300 tiles. All 48 must stop within the planned distance, and changing a live vehicle's friction must rebuild its cached speed profile.
+
+Measure trajectory construction in the native engine:
+
+```sh
+python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --profile-build
+```
+
+This runs 12 routes, including a recorded 403-node path and synthetic paths up to 16,384 nodes. Each gets one warmup and five timed builds, one build per tick. The runner reports median and maximum construction times, curve pieces, tightest radius, refinement work and construction attempts. It checks complete results, repeatable geometry metadata and work limits; timings have no hardware-dependent pass threshold.
+
+Optional curve refinement shares a deterministic weighted work budget, including rejected construction attempts and clearance checks. Results do not depend on elapsed time, so multiplayer peers make the same decisions. Required path processing still grows with the number of nodes: very large paths can exceed one tick even after refinement stops. Compare construction times alongside the driving suites, since reducing search too far can produce tighter bends and slower journeys.
+
+Cornering round real stone walls has a native suite too:
+
+```sh
+python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --corners
+```
+
+A car and a character each start at rest beside the end of a wall, where the path's first corners are inside the arrival radius, and each must also go round the end of a long wall at speed. An ordinary and a powered character with a margin of 0 must also go round a single wall between them and a destination two tiles away, and twelve characters with five exoskeletons and +50% running speed go round three wall shapes from four starting alignments. The same walls and alignments are then mirrored into all four quadrants as separate scenes, at +50% and +200% running speed (0.5625 and 1.125 tiles per tick) and margins of 0 and 0.45: 192 more characters. Characters that have arrived are moved out of the way. All of them must arrive at update intervals of 1 and 10 ticks without touching a wall or entering stuck recovery, and the characters also at 60. At 60 ticks a car holds one steering input for a whole second and circles tight corners, as 0.1.15 did, so the cars do not run at that interval.
+
 The waypoint suite's 18 base-game cases test straight and diagonal traversal with real powered exoskeletons, running-speed bonuses, forward/reverse cars, update intervals of 1, 10, and 60 ticks, and saved movement history. With Space Age installed, add `--space-age` to include powered mech armor flight, giving 21 cases:
 
 ```sh
 python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --waypoints --space-age
 ```
 
-The runner uses temporary mod, configuration, and save directories. It tests native entities, Hovercraft physics, rendering, storage, save/load, and configuration migration through the production movement handlers. Initial motion is seeded, scheduler registration is instrumented, and player/UI calls are mocked because the headless saves have no connected players. Arrival cases must reach the requested destination and finish the queue; clearing a route alone does not count as success. Interactive controls, obstacle steering, and live multiplayer still require in-game validation.
+The runner uses temporary mod, configuration, and save directories. It tests native entities, Hovercraft physics, rendering, storage, save/load, and configuration migration through the production movement handlers. Initial motion is seeded, scheduler registration is instrumented, and player/UI calls are mocked because the headless saves have no connected players. Arrival cases must reach the requested destination and finish the queue; clearing a route alone does not count as success. Interactive controls, obstacle steering beyond the cornering cases, and live multiplayer still require in-game validation.
 
 Before tagging a release, update `info.json` and `changelog.txt`, the only changelog (it is shown on the mod portal and in-game). The publishing workflow runs the checks and requires the tag version to match `info.json`; it does not regenerate release notes or rewrite the version. Pushing a matching `vX.Y.Z` tag publishes to the mod portal using the `Portal` environment's API key.
 

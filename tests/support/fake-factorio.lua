@@ -63,6 +63,11 @@ function Fake.player(state, fields)
   return player
 end
 
+-- The game table a reload sees: the current tick and the player.
+function Fake.game(state)
+  return {tick = state.tick, players = {[1] = state.player}}
+end
+
 ---@param state table storage, tick, surface, player, global_settings and player_settings
 function Fake.vm(state)
   local env = setmetatable({}, {__index = _G}); env._G = env
@@ -72,7 +77,7 @@ function Fake.vm(state)
   env.defines = Fake.defines()
   env.settings = {global = state.global_settings, startup = {}, get_player_settings = function() return state.player_settings end}
   env.remote = {interfaces = {}}
-  env.game = {tick = state.tick, players = {[1] = state.player}}
+  env.game = Fake.game(state)
   env.script = {
     on_event = function(event, handler)
       assert(event ~= nil, "handler registered for an event missing from Fake.defines")
@@ -100,6 +105,7 @@ function Fake.vm(state)
   runtime.navigation = env.require("scripts/navigation")
   runtime.movement = env.require("scripts/movement")
   runtime.pathfinding = env.require("scripts/pathfinding")
+  runtime.vehicle_speed = env.require("scripts/vehicle-speed")
   runtime.command_at = function(position, queued)
     local name = queued and "c2m-move-command-queue" or "c2m-move-command"
     runtime.events[name]({player_index = 1, input_name = name, cursor_position = position})

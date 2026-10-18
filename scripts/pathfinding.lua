@@ -15,7 +15,7 @@ local Pathfinding = {}
 ---@param player LuaPlayer
 ---@param start_pos MapPosition
 ---@param goal MapPosition
----@return LuaSurface.request_path_param | nil
+---@return LuaSurface.request_path_param | nil, number? clearance the margin adds around the path
 function Pathfinding.create_path_request_params(player, start_pos, goal)
   local data = PlayerData.get_all()[player.index]
   local entity_to_move = data and data.move_entity or player.vehicle or player.character
@@ -55,9 +55,18 @@ function Pathfinding.create_path_request_params(player, start_pos, goal)
       cache = is_vehicle_path,
       prefer_straight_paths = is_vehicle_path and config.vehicle_prefer_straight_paths,
     },
-    force = player.force.name,
+    -- Neutral is friendly to every force, so the pathfinder treats natural
+    -- obstacles and other forces' buildings as obstacles to go around.
+    force = "neutral",
     entity_to_ignore = entity_to_move
-  }
+  }, margin
+end
+
+local function needs_destruction(path)
+  for _, waypoint in ipairs(path) do
+    if waypoint.needs_destroy_to_reach then return true end
+  end
+  return false
 end
 
 -- Only a small prefix is prefetched. Completion and queue edits refill it.
@@ -122,7 +131,7 @@ function Pathfinding.invalidate_goal(player_index, goal_index)
   if (goal_index or 1) == 1 then PlayerData.stop_input(data.move_entity, data) end
   if goal.path_id then requests[goal.path_id] = nil end
   goal.path_generation = (goal.path_generation or 0) + 1
-  goal.path, goal.path_id, goal.retry_at = nil, nil, nil
+  goal.path, goal.path_id, goal.retry_at, goal.path_clearance = nil, nil, nil, nil
   data.paths_dirty = true
   Rendering.clear_goal(goal)
   -- A revoked leg must not leave a stale retry wake-up behind. Other prefetched
@@ -199,12 +208,14 @@ function Pathfinding.request_paths_for_player(player_index, force)
         changed = true
       else
         local start = index == 1 and entity.position or data.goals[index - 1].position
-        local params = Pathfinding.create_path_request_params(player, start, goal.position)
+        local params, clearance = Pathfinding.create_path_request_params(player, start, goal.position)
         if not params then return Pathfinding.remove_goal(player_index, index, false) end
         local id = entity.surface.request_path(params)
         if id then
           goal.path_id = id
-          requests[id] = {player_index = player_index, data = data, goal = goal,
+          -- The margin is a property of this request: later setting changes
+          -- cannot widen the corridor the pathfinder actually checked.
+          requests[id] = {player_index = player_index, data = data, goal = goal, clearance = clearance,
             generation = goal.path_generation or 0, entity = entity, surface_index = entity.surface.index}
         else
           goal.retry_at = game.tick + PlayerData.PATH_RETRY_DELAY_TICKS
@@ -267,14 +278,21 @@ function Pathfinding.on_path_request_finished(event)
     if player and player.valid then GUI.update(player_index) end
     return
   end
-  if event.path and #event.path > 0 then
-    goal.path = event.path
+  local path = event.path
+  if path and #path > 0 and needs_destruction(path) then
+    -- This also rejects pending results from older saves that used the
+    -- player's force: following them would drive into the obstacle.
+    path = nil
+  end
+  if path and #path > 0 then
+    goal.path = path
+    goal.path_clearance = request.clearance
     goal.retry_count = 0
     goal.retry_at = nil
     if goal_index == 1 then PlayerData.reset_movement_state(data, true) end
     Rendering.render_goal(player_index, data, goal, goal_index)
     if Config.is_debug(player_index, "path") then
-      player.print("Click2Move: Path found with " .. #event.path .. " waypoints")
+      player.print("Click2Move: Path found with " .. #path .. " waypoints")
     end
   elseif event.try_again_later then
     goal.retry_count = (goal.retry_count or 0) + 1

@@ -13,15 +13,19 @@ local PlayerData = {}
 ---@field position MapPosition
 ---@field path_id? uint32
 ---@field path? PathfinderWaypoint[]
+---@field path_clearance? number margin the pathfinder kept clear around path; nil when unknown
 ---@field retry_count? uint32
 ---@field retry_at? uint32
 
 ---@class PlayerMoveData
+---@field preview? boolean route is visual-only until replaced by a fresh command
+---@field preview_braking? {speed: number, since: uint32, position: MapPosition}
 ---@field owner_index uint32
 ---@field route_surface_index? uint32
 ---@field waypoint_motion? {path: PathfinderWaypoint[], entity: LuaEntity, surface_index: uint32, position: MapPosition, tick: uint32, waypoint: uint32, running_speed: number?, sweep_start: MapPosition?, sweep_end: MapPosition?}
 ---@field waypoint_scan_pending? boolean
 ---@field character_arrival? boolean
+---@field corner_approach? boolean
 ---@field current_waypoint uint32
 ---@field move_entity? LuaEntity
 ---@field render_objs? LuaRenderObject[]
@@ -29,6 +33,11 @@ local PlayerData = {}
 ---@field stuck_counter uint32
 ---@field goals MoveGoal[]
 ---@field vehicle_reapproach? boolean
+---@field vehicle_speed_sample? {tick: uint32, speed: number, accelerating: boolean}
+---@field vehicle_trajectory? {path: PathfinderWaypoint[], entity: LuaEntity, s: number, revision: number}
+---@field vehicle_acceleration? number fastest acceleration seen on this route, tiles per tick per tick
+---@field vehicle_last_position? MapPosition
+---@field vehicle_moved_tick? uint32
 ---@field vehicle_arrival? {position: MapPosition, tick: uint32, stationary_ticks: uint32, speed: number?}
 ---@field closest_dist_to_goal number   -- Best progress made so far
 ---@field no_progress_ticks uint32      -- Actual game ticks without progress
@@ -114,11 +123,17 @@ function PlayerData.reset_movement_state(data, preserve_mode)
   data.waypoint_motion = nil
   data.waypoint_scan_pending = nil
   data.character_arrival = nil
+  data.corner_approach = nil
   data.is_auto_walking = nil
   data.stuck_counter = 0
   data.last_position = nil
   data.vehicle_arrival = nil
   data.vehicle_reapproach = nil
+  data.vehicle_speed_sample = nil
+  data.vehicle_trajectory = nil
+  data.vehicle_acceleration = nil
+  data.vehicle_last_position = nil
+  data.vehicle_moved_tick = nil
   data.goal_failed = nil
   data.closest_dist_to_goal = math.huge
   data.no_progress_ticks = 0
@@ -159,7 +174,7 @@ function PlayerData.migrate()
         or (entity.type ~= "character" and entity.type ~= "car" and entity.type ~= "spider-vehicle")
         or not data.goals or #data.goals == 0 or not PlayerData.can_control_entity(player, entity)
         or not PlayerData.check_route_surface(data, entity)
-        or (entity.type == "spider-vehicle" and not PlayerData.reconcile_spider(data, entity)) then
+        or (entity.type == "spider-vehicle" and not data.preview and not PlayerData.reconcile_spider(data, entity)) then
       PlayerData.cleanup_movement(entity, data)
       PlayerData.remove(player_index)
     else
@@ -206,6 +221,8 @@ local SPIDER_DESTINATION_TOLERANCE = 0.1
 ---@param spider LuaEntity
 ---@return boolean
 function PlayerData.owns_spider_autopilot(data, spider)
+  -- Preview goals were never sent; they cannot adopt a matching foreign command.
+  if data.preview and not data.spider_destination then return false end
   if spider.follow_target then return false end
   local destinations = spider.autopilot_destinations
   if data.spider_arrived then return data.spider_destination ~= nil and #destinations == 0 end
@@ -253,6 +270,37 @@ function PlayerData.stop_input(entity_to_move, data)
   end
 end
 
+-- Preview does not follow a route, but a vehicle already rolling must finish
+-- stopping. Scripted Hovercraft brakes can cross zero into reverse thrust.
+function PlayerData.begin_preview_stop(data)
+  local entity = data.move_entity
+  PlayerData.stop_input(entity, data)
+  if entity and entity.valid and entity.type == "car" then
+    data.preview_braking = {speed = entity.speed, since = game.tick,
+      position = {x = entity.position.x, y = entity.position.y}}
+  end
+end
+
+-- Returns true when stopping is complete, so the scheduler can drop its
+-- every-tick handler. No route progress or destination commands run here.
+function PlayerData.update_preview_stop(data)
+  local state, entity = data.preview_braking, data.move_entity
+  if not state then return false end
+  local speed, distance, ticks = VehicleBraking.apply(entity, state.speed)
+  state.speed = entity.speed
+  local dx, dy = entity.position.x - state.position.x, entity.position.y - state.position.y
+  if math.abs(entity.speed) > speed or dx * dx + dy * dy > distance * distance then
+    state.since = game.tick
+    state.position = {x = entity.position.x, y = entity.position.y}
+  elseif game.tick - state.since >= ticks then
+    entity.riding_state = {direction = defines.riding.direction.straight,
+      acceleration = defines.riding.acceleration.nothing}
+    data.preview_braking = nil
+    return true
+  end
+  return false
+end
+
 -- Stop input and clear controller/rendering state; the caller owns goal removal.
 ---@param entity_to_move? LuaEntity
 ---@param data PlayerMoveData
@@ -260,6 +308,7 @@ function PlayerData.cleanup_movement(entity_to_move, data)
   PlayerData.stop_input(entity_to_move, data)
   Rendering.clear_player(data)
   data.move_entity = nil
+  data.preview_braking = nil
   data.route_surface_index = nil
   PlayerData.reset_movement_state(data)
 end

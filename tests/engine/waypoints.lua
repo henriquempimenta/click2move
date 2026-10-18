@@ -130,6 +130,12 @@ c2m_test_bootstrap.on_init(function()
   -- Seed through production handlers before saving, so the real engine must
   -- serialize and restore shared path references and entity history safely.
   for index, case in ipairs(storage.c2m_waypoint_fixture.cases) do
+    -- The synthetic straight paths cross empty grass, so the configured margin is real clearance.
+    local config = Config.get(index)
+    if not case.flight then
+      case.data.goals[1].path_clearance = case.entity.type == "character" and config.character_margin
+        or config.vehicle_path_margin
+    end
     if case.flight then
       Movement.handle_straight_line(index, case.data, game.players[index], Pathfinding.request_paths_for_player)
     elseif case.entity.type == "character" then

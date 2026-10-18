@@ -10,7 +10,9 @@ players. Entities, physics, rendering objects, storage and saves are native.
 import argparse
 import json
 from pathlib import Path
+import re
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -35,9 +37,9 @@ script.on_nth_tick = function(interval, handler) c2m_test_nth_handlers[interval]
 '''
 
 
-def run(command, log_path):
+def run(command, log_path, timeout=120):
     with log_path.open("w") as log_file:
-        result = subprocess.run(command, stdout=log_file, stderr=subprocess.STDOUT, timeout=120)
+        result = subprocess.run(command, stdout=log_file, stderr=subprocess.STDOUT, timeout=timeout)
     output = log_path.read_text()
     if result.returncode:
         raise RuntimeError(f"Factorio failed ({result.returncode}); see {log_path}\n{output[-5000:]}")
@@ -50,6 +52,11 @@ def main():
     parser.add_argument("--hovercraft", type=Path)
     parser.add_argument("--waypoints", action="store_true", help="Run native character/exoskeleton and car waypoint checks")
     parser.add_argument("--spiders", action="store_true", help="Run native spidertron autopilot ownership checks")
+    parser.add_argument("--corners", action="store_true", help="Run native car and character cornering checks")
+    parser.add_argument("--fast-cars", action="store_true", help="Run native high-speed vehicle corridor checks (needs the quality mod)")
+    parser.add_argument("--physics", action="store_true", help="Measure native braking against production speed limits (needs the quality mod)")
+    parser.add_argument("--profile-build", action="store_true", help="Profile trajectory construction in native Factorio (reports times without hardware-specific deadlines)")
+    parser.add_argument("--vulcanus", action="store_true", help="Drive fast cars across generated Vulcanus terrain (needs Space Age)")
     parser.add_argument("--space-age", action="store_true", help="Enable Space Age and include native powered mech armor flight")
     args = parser.parse_args()
     factorio = args.factorio.resolve()
@@ -61,6 +68,21 @@ def main():
         return
     if args.spiders:
         run_spiders(factorio, data, workspace)
+        return
+    if args.corners:
+        run_corners(factorio, data, workspace)
+        return
+    if args.fast_cars:
+        run_fast_cars(factorio, data, workspace)
+        return
+    if args.physics:
+        run_physics(factorio, data, workspace)
+        return
+    if args.profile_build:
+        run_profile_build(factorio, data, workspace)
+        return
+    if args.vulcanus:
+        run_vulcanus(factorio, data, workspace)
         return
     if args.hovercraft is None:
         parser.error("--hovercraft is required unless --waypoints is selected")
@@ -194,6 +216,223 @@ def run_spiders(factorio, data, workspace):
     speedup = output.split("speedup=")[1].split()[0]
     print(f"PASS 9 native spidertron autopilot ownership scenarios (arrivals within {distance} tiles; "
           f"foreign completion from x={foreign} rejected; exoskeleton speedup {speedup}x)", flush=True)
+
+
+def run_corners(factorio, data, workspace):
+    # At interval 60 a car holds one steering input for a second and circles
+    # tight corners, as 0.1.15 did, so only the character cases run there.
+    total = 0
+    for interval, cases in ((1, 210), (10, 210), (60, 208)):
+        mods = workspace / f"corners-{interval}" / "mods"
+        mod = mods / "click2move"
+        mod.mkdir(parents=True)
+        for name in package_files(ROOT):
+            target = mod / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / name, target)
+        control = mod / "control.lua"
+        control.write_text(f"local C2M_NATIVE_INTERVAL = {interval}\n" + control.read_text() + "\n"
+            + (ROOT / "tests/engine/corners.lua").read_text())
+        (mods / "mod-list.json").write_text(json.dumps({"mods": [
+            {"name": "base", "enabled": True}, {"name": "click2move", "enabled": True}] + expansion_mods(False)}))
+        root = mods.parent
+        write_data = root / "userdata"
+        write_data.mkdir()
+        config = root / "config.ini"
+        config.write_text(f"[path]\nread-data={data}\nwrite-data={write_data}\n[other]\ncheck-updates=false\n")
+        common = [str(factorio), "--config", str(config), "--mod-directory", str(mods)]
+        save = root / "fixture.zip"
+        run(common + ["--create", str(save), "--map-gen-seed", "1"], root / "create.log")
+        output = run(common + ["--benchmark", str(save), "--benchmark-ticks", "3100", "--benchmark-runs", "1"], root / "run.log")
+        marker = f"C2M_NATIVE_CORNERS_OK {cases} interval={interval}"
+        if marker not in output:
+            raise RuntimeError(f"Missing native cornering assertions; see {root / 'run.log'}")
+        ticks = [int(tick) for tick in output.split(marker + " ticks=")[1].split()[0].split(",")]
+        print(f"PASS interval {interval}: {cases} native cornering cases, slowest arrival {max(ticks)} ticks", flush=True)
+        total += cases
+    print(f"PASS {total} native cornering scenarios across intervals 1, 10 and 60", flush=True)
+
+
+def run_fast_cars(factorio, data, workspace):
+    for interval in (1, 10):
+        mods = workspace / f"fast-cars-{interval}" / "mods"
+        mod = mods / "click2move"
+        mod.mkdir(parents=True)
+        for name in package_files(ROOT):
+            target = mod / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / name, target)
+        control = mod / "control.lua"
+        control.write_text(f"local C2M_NATIVE_INTERVAL = {interval}\n" + control.read_text() + "\n"
+            + (ROOT / "tests/engine/fast-cars.lua").read_text())
+        # Quality needs the recycler; Space Age itself stays disabled.
+        (mods / "mod-list.json").write_text(json.dumps({"mods": [
+            {"name": "base", "enabled": True}, {"name": "click2move", "enabled": True},
+            {"name": "space-age", "enabled": False}, {"name": "quality", "enabled": True},
+            {"name": "elevated-rails", "enabled": False}, {"name": "recycler", "enabled": True}]}))
+        root = mods.parent
+        write_data = root / "userdata"
+        write_data.mkdir()
+        config = root / "config.ini"
+        config.write_text(f"[path]\nread-data={data}\nwrite-data={write_data}\n[other]\ncheck-updates=false\n")
+        common = [str(factorio), "--config", str(config), "--mod-directory", str(mods)]
+        save = root / "fixture.zip"
+        run(common + ["--create", str(save), "--map-gen-seed", "1"], root / "create.log")
+        output = run(common + ["--benchmark", str(save), "--benchmark-ticks", "5100", "--benchmark-runs", "1"], root / "run.log")
+        marker = f"C2M_NATIVE_FAST_CARS_OK 13 interval={interval}"
+        if marker not in output:
+            raise RuntimeError(f"Missing native fast-car assertions; see {root / 'run.log'}")
+        report = output.split(marker + " ticks:top_speed=")[1].split()[0]
+        print(f"PASS interval {interval}: 13 native high-speed corridor cases (arrival ticks:top speed {report})", flush=True)
+    print("PASS 26 native high-speed corridor scenarios across intervals 1 and 10", flush=True)
+
+
+def run_profile_build(factorio, data, workspace):
+    root = workspace / "build-profile"
+    mods = root / "mods"
+    mod = mods / "click2move"
+    mod.mkdir(parents=True)
+    for name in package_files(ROOT):
+        target = mod / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, target)
+    # Profilers only report duration; their values never affect game state.
+    (mod / "control.lua").write_text((ROOT / "tests/engine/build-profile.lua").read_text())
+    (mods / "mod-list.json").write_text(json.dumps({"mods": [
+        {"name": "base", "enabled": True}, {"name": "click2move", "enabled": True}]
+        + expansion_mods(False)}))
+    write_data = root / "userdata"
+    write_data.mkdir()
+    config = root / "config.ini"
+    config.write_text(f"[path]\nread-data={data}\nwrite-data={write_data}\n[other]\ncheck-updates=false\n")
+    common = [str(factorio), "--config", str(config), "--mod-directory", str(mods)]
+    save = root / "fixture.zip"
+    run(common + ["--create", str(save), "--map-gen-seed", "1"], root / "create.log")
+    output = run(common + ["--benchmark", str(save), "--benchmark-ticks", "72", "--benchmark-runs", "1"],
+                 root / "run.log", timeout=180)
+    expected = {"short-turn", "native-hairpin", "native-hairpin-high", "winding400", "winding400-high",
+                "winding1600", "stair1024", "stair4096", "stair16384", "straight16384", "zigzag4096", "zigzag16384"}
+    summary = "C2M_NATIVE_BUILD_PROFILE_OK cases=12 trials=60"
+    if output.splitlines().count(summary) != 1:
+        raise RuntimeError(f"Missing complete native build profile; see {root / 'run.log'}")
+    pattern = re.compile(r"C2M_BUILD_PROFILE case=(\S+) trial=(\d+) nodes=(\d+) pieces=(\d+) arcs=(\d+) "
+                         r"radius=([\d.]+) work=(\d+) limit=(\d+) attempts=(\d+) total=Duration: ([\d.]+)ms")
+    cases = {}
+    for line in output.splitlines():
+        if "C2M_BUILD_PROFILE " not in line:
+            continue
+        match = pattern.search(line)
+        if not match:
+            raise RuntimeError(f"Malformed native build measurement; see {root / 'run.log'}")
+        name = match[1]
+        trial, nodes, pieces, arcs = map(int, match.group(2, 3, 4, 5))
+        radius = float(match[6])
+        work, limit, attempts = map(int, match.group(7, 8, 9))
+        milliseconds = float(match[10])
+        trials = cases.setdefault(name, {})
+        if name not in expected or trial in trials or not 1 <= trial <= 5 or not 0 <= work <= limit:
+            raise RuntimeError(f"Invalid native build measurement; see {root / 'run.log'}")
+        trials[trial] = (milliseconds, nodes, pieces, arcs, radius, work, limit, attempts)
+    if set(cases) != expected or any(set(trials) != set(range(1, 6)) for trials in cases.values()):
+        raise RuntimeError(f"Incomplete native build measurements; see {root / 'run.log'}")
+    for name, trials in cases.items():
+        measurements = list(trials.values())
+        if len({row[1:] for row in measurements}) != 1:
+            raise RuntimeError(f"Non-deterministic build metadata for {name}; see {root / 'run.log'}")
+        times = [row[0] for row in measurements]
+        _, nodes, pieces, arcs, radius, work, limit, attempts = measurements[0]
+        print(f"PROFILE {name}: median={statistics.median(times):.3f}ms max={max(times):.3f}ms "
+              f"nodes={nodes} pieces={pieces} arcs={arcs} tightest_radius={radius:g} "
+              f"work={work}/{limit} attempts={attempts}", flush=True)
+    print("PASS 12 native trajectory build profiles, 60 measured builds within the refinement work budget", flush=True)
+
+
+def run_physics(factorio, data, workspace):
+    root = workspace / "physics"
+    mods = root / "mods"
+    mod = mods / "click2move"
+    mod.mkdir(parents=True)
+    for name in package_files(ROOT):
+        target = mod / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, target)
+    # The fixture imports the production speed planner directly. It uses native
+    # entities and event scheduling and does not install any player/UI shims.
+    (mod / "control.lua").write_text((ROOT / "tests/engine/physics.lua").read_text())
+    (mods / "mod-list.json").write_text(json.dumps({"mods": [
+        {"name": "base", "enabled": True}, {"name": "click2move", "enabled": True},
+        {"name": "space-age", "enabled": False}, {"name": "quality", "enabled": True},
+        {"name": "elevated-rails", "enabled": False}, {"name": "recycler", "enabled": True}]}))
+    write_data = root / "userdata"
+    write_data.mkdir()
+    config = root / "config.ini"
+    config.write_text(f"[path]\nread-data={data}\nwrite-data={write_data}\n[other]\ncheck-updates=false\n")
+    common = [str(factorio), "--config", str(config), "--mod-directory", str(mods)]
+    save = root / "fixture.zip"
+    run(common + ["--create", str(save), "--map-gen-seed", "1"], root / "create.log")
+    output = run(common + ["--benchmark", str(save), "--benchmark-ticks", "4100", "--benchmark-runs", "1"],
+                 root / "run.log")
+    marker = "C2M_NATIVE_PHYSICS_OK 48 actual native braking distances and live friction cache changes"
+    if marker not in output:
+        raise RuntimeError(f"Missing native physics assertions; see {root / 'run.log'}")
+    print("PASS 48 native braking scenarios: car/tank, normal/legendary, fueled/unfueled, "
+          "zero/tiny/stock friction, 100/300 tiles and live friction cache changes", flush=True)
+
+
+def parse_vulcanus_result(output, interval, log_path):
+    """Require the engine's complete result, including coverage-only failures."""
+    marker = "C2M_NATIVE_VULCANUS_DONE"
+    summaries = [line.strip() for line in output.splitlines() if marker in line]
+    if len(summaries) != 1:
+        raise RuntimeError(f"Expected one native Vulcanus summary, found {len(summaries)}; see {log_path}")
+    summary = summaries[0]
+    match = re.fullmatch(r"C2M_NATIVE_VULCANUS_DONE (\d+) interval=(\d+) reachable=(\d+) failures=(\d+)", summary)
+    if not match:
+        raise RuntimeError(f"Malformed native Vulcanus summary: {summary}; see {log_path}")
+    sites, observed_interval, reachable, failures = map(int, match.groups())
+    route_failures = [line.split("C2M_VULCANUS FAIL ", 1)[1]
+                      for line in output.splitlines() if "C2M_VULCANUS FAIL " in line]
+    if observed_interval != interval or not 8 <= reachable <= sites or failures or route_failures:
+        details = "\n".join(route_failures)
+        raise RuntimeError(f"Native Vulcanus failed: {summary}; expected interval={interval} and at least 8 reachable routes; "
+                           f"see {log_path}" + ("\n" + details if details else ""))
+    return summary[len(marker) + 1:]
+
+
+def run_vulcanus(factorio, data, workspace):
+    failed = []
+    for interval in (1, 10):
+        mods = workspace / f"vulcanus-{interval}" / "mods"
+        mod = mods / "click2move"
+        mod.mkdir(parents=True)
+        for name in package_files(ROOT):
+            target = mod / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / name, target)
+        control = mod / "control.lua"
+        control.write_text(f"local C2M_NATIVE_INTERVAL = {interval}\n" + control.read_text() + "\n"
+            + (ROOT / "tests/engine/vulcanus.lua").read_text())
+        (mods / "mod-list.json").write_text(json.dumps({"mods": [
+            {"name": "base", "enabled": True}, {"name": "click2move", "enabled": True}] + expansion_mods(True)}))
+        root = mods.parent
+        write_data = root / "userdata"
+        write_data.mkdir()
+        config = root / "config.ini"
+        config.write_text(f"[path]\nread-data={data}\nwrite-data={write_data}\n[other]\ncheck-updates=false\n")
+        common = [str(factorio), "--config", str(config), "--mod-directory", str(mods)]
+        save = root / "fixture.zip"
+        run(common + ["--create", str(save), "--map-gen-seed", "1"], root / "create.log")
+        output = run(common + ["--benchmark", str(save), "--benchmark-ticks", "40000", "--benchmark-runs", "1"],
+                     root / "run.log", timeout=900)
+        try:
+            summary = parse_vulcanus_result(output, interval, root / "run.log")
+        except RuntimeError as error:
+            failed.append(str(error))
+            print(f"FAIL interval {interval}: {error}", flush=True)
+        else:
+            print(f"PASS {summary}", flush=True)
+    if failed:
+        raise RuntimeError("Vulcanus routes failed:\n" + "\n".join(failed))
 
 
 if __name__ == "__main__":

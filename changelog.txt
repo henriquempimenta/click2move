@@ -1,4 +1,26 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.1.16
+  Features:
+    - Refit neighboring bends to reduce peak curvature and total squared curvature within the original path margin. Use gentler approach corrections to avoid extra braking, and let the final curve stop at the exact destination without forcing the last waypoint heading. Keep the existing curve whenever a replacement cannot be certified within the work budget.
+    - Add optional colored path-margin and smooth steering-reference overlays, plus a paused route preview that recalculates when margins change. Existing previews stay paused until a fresh movement command.
+    - Plan steering and braking along the same rounded vehicle route, using braking force, weight, friction and turning rate to slow for corners, heading corrections and the destination, forwards and in reverse. Keep rounding inside the recorded path clearance, reserve room for the rotated body and tracking, and retain explicit waypoint steering when clearance is zero or unknown.
+    - Take corners on a racing line that swings out to the far side of the cleared corridor before and after the corner and cuts in at the apex, roughly doubling the turning radius of a curve that only cuts the inside. Corners the pathfinder cut into 45-degree steps are taken the same way.
+    - Smooth a lane shift round an obstacle, two opposite corners joined by a short leg, into one wide curve across the corridor, instead of slowing for each corner. Every such curve is checked against the original path within a fixed work budget.
+    - Plan tank cornering with the turning rate measured for its fuel and powered exoskeletons, and braking with the strength measured for the fuel's top speed bonus. A last item of fuel only counts while it holds twenty seconds of full throttle, so running out cannot leave a vehicle too fast for its brakes.
+  Bugfixes:
+    - Share a deterministic work budget across curve refinement, counting rejected construction attempts as well as clearance checks. Avoid repeated bridge searches and speed up clearance proofs while preserving their safety checks and driving performance. Required processing of very large paths still grows with their length.
+    - Avoid braking again for an already accepted corner on zero-margin routes, and control tight explicit corners every tick. Keep the existing corner speed limits and path clearance.
+    - Ignore missing or invalid movement entities when drawing debug overlays.
+    - Stop a vehicle slowed for a tight turn from being taken for stuck, which could repeat stuck recovery forever. A vehicle that is still moving has as long as one and a half turning circles take; a target beside a stopped vehicle is turned towards by creeping forward; and a waypoint under the vehicle's own body counts as reached.
+    - Never cut a vehicle's speed by more than one tick of braking. At longer update intervals, a vehicle braking towards its limit is controlled every tick instead, so it no longer lurches to a crawl as if it had hit a cliff.
+    - Request routes with the neutral force so rocks, trees and buildings are obstacles from the first request. Reject any returned route that still requires destruction with "No path found", without requesting a second path.
+    - Stop cars and characters from skipping corners near the start of a route, or while stopped, and driving into the obstacle the path goes round. A waypoint inside the arrival radius is now consumed only once it has been reached or passed, including by the movement observed over a single tick, or when the straight line to the next waypoint stays within the clearance the pathfinder checked for that path.
+    - Steer every tick while the next update could overshoot a corner, the destination, or a waypoint whose passing cannot be proven from straight-line movement, instead of treating possible travel as progress.
+    - Control vehicles every tick while one update of turning or acceleration could carry them past the heading or speed they need, instead of overshooting into walls at longer update intervals.
+    - Correct both directions when a character walks towards a waypoint that is off in both, instead of only the larger one, which could trap fast characters crossing back and forth over the waypoint's line.
+    - Judge shortcuts against the margin each path was requested with, so changing a margin setting cannot widen the clearance of existing or pending paths. Paths saved by older versions are requested again.
+    - Continue to the final destination in the same update after a backlog of passed waypoints is drained at long update intervals, instead of steering towards a waypoint beside the vehicle until the next update.
+---------------------------------------------------------------------------------------------------
 Version: 0.1.15
 Date: 2026-10-15
   Features:

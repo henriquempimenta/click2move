@@ -8,6 +8,7 @@ local Config = require("scripts/config")
 local PlayerData = require("scripts/player-data")
 local Navigation = require("scripts/navigation")
 local VehicleBraking = require("scripts/vehicle-braking")
+local VehicleSpeed = require("scripts/vehicle-speed")
 local Pathfinding = require("scripts/pathfinding")
 local Mode = require("scripts/mode")
 local GUI = require("scripts/gui")
@@ -31,6 +32,29 @@ local function latch_character_arrival(data, character, goal, config, arrival_ra
   if Util.distance_sq(character.position, goal.position) <= lookahead ^ 2 then
     data.character_arrival = true
   end
+end
+
+-- Assumed until a vehicle's acceleration is observed: a car on legendary
+-- nuclear fuel gains about 0.07 tiles per tick per tick from rest.
+local DEFAULT_VEHICLE_ACCELERATION = 0.08
+
+-- Fuel and quality change acceleration, so the fastest seen on this route is used.
+local function observe_acceleration(data, vehicle)
+  local sample, speed = data.vehicle_speed_sample, math.abs(vehicle.speed or 0)
+  if sample and sample.accelerating and game.tick > sample.tick then
+    local rate = (speed - sample.speed) / (game.tick - sample.tick)
+    if rate > (data.vehicle_acceleration or 0) then data.vehicle_acceleration = rate end
+  end
+end
+
+-- Steer every tick while one update could overshoot an unproven waypoint, or,
+-- for a turning vehicle, the heading it needs.
+---@return boolean changed
+local function update_corner_approach(data, entity, path, step, overshooting)
+  local approaching = (overshooting or Navigation.near_unproven_waypoint(path, data.current_waypoint, entity.position, step)) or nil
+  if approaching == data.corner_approach then return false end
+  data.corner_approach = approaching
+  return true
 end
 
 local function brake_at_goal(data, vehicle, goal, config)
@@ -107,7 +131,8 @@ end
 ---@param current_pos MapPosition
 ---@param goal_pos MapPosition
 ---@return boolean is_stuck
-function Movement.check_progress_and_stuck(data, current_pos, goal_pos, player_index)
+---@param maneuver_ticks? number a longer window while the actor is deliberately manoeuvring
+function Movement.check_progress_and_stuck(data, current_pos, goal_pos, player_index, maneuver_ticks)
   local config = Config.get(player_index)
   local elapsed = data.last_progress_tick and game.tick - data.last_progress_tick or 0
   data.last_progress_tick = game.tick
@@ -122,7 +147,7 @@ function Movement.check_progress_and_stuck(data, current_pos, goal_pos, player_i
   end
 
   -- Without a new best distance for twice the configured threshold, we are stuck.
-  local stuck_limit = config.stuck_threshold * 2
+  local stuck_limit = math.max(config.stuck_threshold * 2, maneuver_ticks or 0)
   return data.no_progress_ticks > stuck_limit
 end
 
@@ -248,14 +273,26 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
   local speed = math.abs(vehicle.speed or 0)
   local dynamic_threshold_sq = (config.vehicle_proximity_threshold + speed * 3.0) ^ 2
   local was_pending = data.waypoint_scan_pending
-  local advanced, pending = Navigation.advance_waypoints(data, vehicle, goal.path, dynamic_threshold_sq, game.tick)
+  -- A waypoint under the vehicle's own body is reached: a car cannot drive
+  -- onto a point beside it any closer than its turning circle allows.
+  local box = vehicle.prototype and vehicle.prototype.collision_box
+  local body = box and math.max(-box.left_top.x, -box.left_top.y, box.right_bottom.x, box.right_bottom.y) or 0
+  local advanced, pending = Navigation.advance_waypoints(data, vehicle, goal.path, dynamic_threshold_sq, game.tick,
+    goal.path_clearance, body)
   if was_pending ~= data.waypoint_scan_pending then PlayerData.notify_changed() end
+  if pending then PlayerData.stop_input(vehicle, data); return false end
+  local speed_limit, curve_target, on_curve, reached = VehicleSpeed.control(vehicle, goal.path,
+    data.current_waypoint, goal.path_clearance, speed * config.update_interval, data)
+  if reached and reached > data.current_waypoint then
+    advanced = advanced + reached - data.current_waypoint
+    data.current_waypoint = reached
+    Navigation.reset_waypoint_motion(data)
+  end
   if advanced > 0 then
     data.closest_dist_to_goal = math.huge
     data.no_progress_ticks = 0
     data.last_progress_tick = game.tick
   end
-  if pending then PlayerData.stop_input(vehicle, data); return false end
   local waypoint = goal.path[data.current_waypoint]
   if not waypoint or not waypoint.position then return true end
 
@@ -281,9 +318,18 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
     end
   end
 
-  -- Recover if no progress has been made for the configured time.
+  -- Recover if no progress has been made for the configured time. A vehicle
+  -- slowed for a tight turn is manoeuvring, not jammed: while it moves, it
+  -- has as long as one and a half turning circles at its speed limit take.
+  if not data.vehicle_last_position or speed > 0.005
+      or Util.distance_sq(vehicle.position, data.vehicle_last_position) > 0.0001 then
+    data.vehicle_moved_tick = game.tick
+  end
+  data.vehicle_last_position = {x = vehicle.position.x, y = vehicle.position.y}
+  local maneuvering = game.tick - data.vehicle_moved_tick <= config.stuck_threshold
+  local maneuver_ticks = maneuvering and VehicleSpeed.maneuver_ticks(vehicle, speed_limit) or nil
   local target_for_stuck_check = target_pos
-  if Movement.check_progress_and_stuck(data, vehicle.position, target_for_stuck_check, player_index) then
+  if Movement.check_progress_and_stuck(data, vehicle.position, target_for_stuck_check, player_index, maneuver_ticks) then
 
     if Config.is_debug(player_index, "vehicle") then player.print("Click2Move: Vehicle stuck detected (No progress). Initiating Reverse.") end
 
@@ -302,8 +348,29 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
     return false
   end
 
-  -- Move to current/next waypoint
-  Navigation.set_vehicle_riding(vehicle, target_pos)
+  -- Move to current/next waypoint, slow enough for the corners and the destination ahead.
+  observe_acceleration(data, vehicle)
+  if curve_target and data.current_waypoint < #goal.path then target_pos = curve_target end
+  -- Only a single tick's braking may be cut short at the limit: real brakes
+  -- could have done that much. A longer overshoot is handled by controlling
+  -- every tick instead.
+  Navigation.set_vehicle_riding(vehicle, target_pos, speed_limit,
+    VehicleSpeed.braking_overshoots(vehicle, speed_limit, 1), curve_target ~= nil)
+  local riding = vehicle.riding_state
+  local accelerating = riding.acceleration == defines.riding.acceleration.accelerating
+    or riding.acceleration == defines.riding.acceleration.reversing
+  data.vehicle_speed_sample = {tick = game.tick, speed = speed, accelerating = accelerating}
+  -- Control every tick while one update could carry the vehicle past the
+  -- heading it needs, or past its speed limit while accelerating or braking.
+  local overshooting = on_curve or (riding.direction ~= defines.riding.direction.straight
+      and VehicleSpeed.steering_overshoots(vehicle, target_pos, config.update_interval))
+    or (accelerating and speed_limit ~= nil and speed_limit - speed
+      < (data.vehicle_acceleration or DEFAULT_VEHICLE_ACCELERATION) * (config.update_interval + 1))
+    or (riding.acceleration == defines.riding.acceleration.braking
+      and VehicleSpeed.braking_overshoots(vehicle, speed_limit, config.update_interval + 1))
+  if update_corner_approach(data, vehicle, goal.path, speed * config.update_interval, overshooting) then
+    PlayerData.notify_changed()
+  end
 
   return false
 end
@@ -348,14 +415,16 @@ function Movement.handle_character(player_index, data, player, character)
   local speed_per_tick = character.character_running_speed or 0
   local dynamic_threshold_sq = (config.proximity_threshold + speed_per_tick * 1.5) ^ 2
   local was_pending, was_arriving = data.waypoint_scan_pending, data.character_arrival
-  local advanced, pending = Navigation.advance_waypoints(data, character, goal.path, dynamic_threshold_sq, game.tick)
+  local advanced, pending = Navigation.advance_waypoints(data, character, goal.path, dynamic_threshold_sq, game.tick,
+    goal.path_clearance)
+  local approach_changed = update_corner_approach(data, character, goal.path, speed_per_tick * config.update_interval)
   local at_final = data.current_waypoint == #goal.path
   if not at_final then
     data.character_arrival = nil
   else
     latch_character_arrival(data, character, goal, config, config.proximity_threshold + speed_per_tick * 1.5)
   end
-  if was_pending ~= data.waypoint_scan_pending or was_arriving ~= data.character_arrival then
+  if was_pending ~= data.waypoint_scan_pending or was_arriving ~= data.character_arrival or approach_changed then
     PlayerData.notify_changed()
   end
   if advanced > 0 then

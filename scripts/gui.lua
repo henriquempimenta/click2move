@@ -65,6 +65,10 @@ function GUI.update(player_index)
       if #data.goals > 1 then
         caption = {"click2move.moving-to-queued", Util.format_pos(next_goal.position), #data.goals - 1}
       end
+      if data.preview then
+        caption = #data.goals > 1 and {"click2move.preview-to-queued", Util.format_pos(next_goal.position), #data.goals - 1}
+          or {"click2move.preview-to", Util.format_pos(next_goal.position)}
+      end
       root[GUI.LABEL_NAME].caption = caption
     end
   else

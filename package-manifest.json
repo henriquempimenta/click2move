@@ -11,8 +11,11 @@
   "scripts/pathfinding.lua",
   "scripts/player-data.lua",
   "scripts/rendering.lua",
+  "scripts/debug-rendering.lua",
   "scripts/util.lua",
   "scripts/vehicle-braking.lua",
+  "scripts/vehicle-speed.lua",
+  "scripts/vehicle-trajectory.lua",
   "locale/en/locale.cfg",
   "thumbnail.png",
   "changelog.txt"

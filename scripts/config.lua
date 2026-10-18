@@ -15,7 +15,7 @@ local defaults = {
   character_margin = 0.45, proximity_threshold = 1.5,
   vehicle_proximity_threshold = 6.0, stuck_threshold = 30,
   vehicle_path_margin = 2.0, vehicle_prefer_straight_paths = false,
-  disable_on_arrival = false
+  disable_on_arrival = false, debug_margins = false, debug_curve = false, debug_preview = false
 }
 local setting_names = {
   character_margin = "c2m-character-margin",
@@ -24,6 +24,7 @@ local setting_names = {
   stuck_threshold = "c2m-stuck-threshold",
   vehicle_path_margin = "c2m-vehicle-path-margin",
   vehicle_prefer_straight_paths = "c2m-vehicle-prefer-straight-paths",
+  debug_margins = "c2m-debug-margins", debug_curve = "c2m-debug-curve", debug_preview = "c2m-debug-preview",
   disable_on_arrival = "c2m-disable-on-arrival"
 }
 local update_interval = 1

@@ -35,6 +35,27 @@ data:extend({
     order = "a-d"
   },
   {
+    type = "bool-setting",
+    name = "c2m-debug-margins",
+    setting_type = "runtime-per-user",
+    default_value = false,
+    order = "a-e"
+  },
+  {
+    type = "bool-setting",
+    name = "c2m-debug-curve",
+    setting_type = "runtime-per-user",
+    default_value = false,
+    order = "a-f"
+  },
+  {
+    type = "bool-setting",
+    name = "c2m-debug-preview",
+    setting_type = "runtime-per-user",
+    default_value = false,
+    order = "a-g"
+  },
+  {
     type = "double-setting",
     name = "c2m-character-margin",
     setting_type = "runtime-per-user",

@@ -2,6 +2,8 @@
 -- Each VM has a fresh environment and module cache. Only engine/storage state
 -- crosses reloads, unlike calling on_load inside an already-loaded Lua module.
 local Fake = dofile("tests/support/fake-factorio.lua")
+-- Lua 5.3+ dropped math.atan2 for a two-argument math.atan.
+local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
 
 local function engine(interval)
   local state = {storage = {}, tick = 0, next_path = 0, requests = {}, objects = {}}
@@ -49,7 +51,7 @@ test("fresh VM load keeps active paths, pending callbacks and rendering handles"
   loaded.env.game = nil -- Factorio does not expose game during on_load.
   loaded.load()
   assert(loaded.pd.get_all()[1] == original and original.goals[1].rendering == markers)
-  loaded.env.game = {tick = state.tick, players = {[1] = state.player}}
+  loaded.env.game = Fake.game(state)
   loaded.path(2, {{position = {x = 200, y = 0}}})
   assert(original.goals[2].path, "saved pending request index was lost")
   loaded.tick()
@@ -67,7 +69,7 @@ test("fresh VM reload retains braking until a car actually settles", function()
   local data = first.pd.get_all()[1]
   assert(data.vehicle_arrival)
   local loaded = vm(state); loaded.env.game = nil; loaded.load()
-  loaded.env.game = {tick = state.tick, players = {[1] = state.player}}
+  loaded.env.game = Fake.game(state)
   assert(loaded.events[loaded.env.defines.events.on_tick], "braking scheduler was not rebound")
   loaded.tick(); assert(vehicle.riding_state.acceleration == 2 and loaded.pd.get_all()[1])
   vehicle.speed = 0
@@ -546,6 +548,269 @@ test("migration rebuilds markers for an active flight route", function()
   local numbers = data.goals[1].rendering.numbers
   assert(numbers and #numbers == 2 and numbers[2].spec.render_mode == "chart", "flight markers were not rebuilt")
   assert(data.is_straight_line_move and #data.goals == 1)
+end)
+
+test("fresh VM reload rebuilds the same vehicle curve without losing its progress", function()
+  local Trajectory = dofile("scripts/vehicle-trajectory.lua")
+  for _, margin in ipairs({0, 2}) do
+    local state = engine(10)
+    state.player_settings = Fake.player_settings({["c2m-vehicle-path-margin"] = margin})
+    local vehicle = {valid = true, name = "car", type = "car", speed = .05, orientation = .25,
+      position = {x = 0, y = 0}, surface = state.surface,
+      prototype = {braking_force = 10000 / 3, weight = 700, rotation_speed = .015,
+        friction_force = .002, terrain_friction_modifier = 1,
+        collision_box = {left_top = {x = -.7, y = -1}, right_bottom = {x = .7, y = 1}}}}
+    vehicle.get_driver = function() return state.character end
+    state.player.vehicle, state.player.physical_vehicle = vehicle, vehicle
+    local first = vm(state)
+    first.env.prototypes = {tile = {concrete = {vehicle_friction_modifier = .8}}}
+    first.init(); first.command(40, 40)
+    local path = {}
+    for x = 0, 40 do path[#path + 1] = {position = {x = x, y = 0}} end
+    for y = 1, 40 do path[#path + 1] = {position = {x = 40, y = y}} end
+    first.path(1, path)
+    local data = first.pd.get_all()[1]
+    local geometry = first.vehicle_speed.trajectory(vehicle, path, margin)
+    local tangent
+    vehicle.position, tangent = Trajectory.sample(geometry, geometry.waypoint_s[41])
+    vehicle.orientation = atan2(tangent.x, -tangent.y) / (2 * math.pi)
+    data.current_waypoint = 41
+    local before = {first.vehicle_speed.control(vehicle, path, 41, margin, .5, data)}
+    local progress = data.vehicle_trajectory.s
+    local loaded = vm(state)
+    loaded.env.prototypes = first.env.prototypes
+    loaded.env.game = nil; loaded.load(); loaded.env.game = Fake.game(state)
+    local after = {loaded.vehicle_speed.control(vehicle, path, 41, margin, .5, data)}
+    assert(math.abs(before[1] - after[1]) < 1e-10, "reload changed the braking profile")
+    assert(math.abs(data.vehicle_trajectory.s - progress) < 1e-10, "reload lost projection progress")
+    assert(before[4] == after[4], "reload changed waypoint advancement")
+    if margin == 0 then
+      assert(not after[2] and after[4] == 41, "zero clearance invented curve progress")
+    else
+      assert(after[2] and math.abs(before[2].x - after[2].x) < 1e-10
+        and math.abs(before[2].y - after[2].y) < 1e-10, "reload changed the steering reference")
+    end
+    loaded.events["c2m-cancel-command"]({player_index = 1, input_name = "c2m-cancel-command"})
+    assert(not data.vehicle_trajectory, "cancellation retained curve progress")
+  end
+end)
+
+local function setting(runtime, state, name, value)
+  state.player_settings[name] = {value = value}
+  runtime.events[runtime.env.defines.events.on_runtime_mod_setting_changed]({player_index = 1, setting = name})
+end
+
+test("preview never walks, survives reload, and disabling requires a fresh click", function()
+  local state = engine(10)
+  state.player_settings = Fake.player_settings({["c2m-debug-preview"] = true, ["c2m-debug-margins"] = true})
+  local runtime = vm(state); runtime.init()
+  state.character.walking_state = {walking = true, direction = 4}
+  runtime.command(100)
+  assert(not state.character.walking_state.walking, "preview retained previous walking input")
+  local path = {{position = {x = 0, y = 0}}, {position = {x = 100, y = 0}}}
+  runtime.path(1, path)
+  local data = runtime.pd.get_all()[1]
+  for _ = 1, 100 do runtime.tick() end
+  assert(data.preview and not state.character.walking_state.walking and data.current_waypoint == 1)
+  local loaded = vm(state); loaded.env.game = nil; loaded.load(); loaded.env.game = Fake.game(state)
+  for _ = 1, 100 do loaded.tick() end
+  assert(data.preview and not state.character.walking_state.walking)
+  setting(loaded, state, "c2m-debug-preview", false)
+  for _ = 1, 100 do loaded.tick() end
+  assert(data.preview and not state.character.walking_state.walking, "setting change started a saved preview")
+  loaded.command(200, 0, true) -- A mismatched queue command must replace the preview.
+  assert(not data.preview and #data.goals == 1 and data.goals[1].position.x == 200)
+  loaded.path(2, {{position = {x = 0, y = 0}}, {position = {x = 200, y = 0}}})
+  loaded.tick(10)
+  assert(state.character.walking_state.walking)
+end)
+
+test("enabling preview stops active walking and margin edits reject stale paths", function()
+  local state = engine(); local runtime = vm(state); runtime.init(); runtime.command(100)
+  runtime.path(1, {{position = {x = 0, y = 0}}, {position = {x = 100, y = 0}}}); runtime.tick()
+  assert(state.character.walking_state.walking)
+  setting(runtime, state, "c2m-debug-preview", true)
+  local data = runtime.pd.get_all()[1]
+  assert(data.preview and not state.character.walking_state.walking)
+  setting(runtime, state, "c2m-character-margin", 1)
+  local stale = state.next_path
+  assert(state.requests[stale].bounding_box.right_bottom.x == 1.2)
+  setting(runtime, state, "c2m-character-margin", 2)
+  runtime.path(stale, {{position = {x = 999, y = 999}}})
+  assert(not data.goals[1].path, "stale preview callback widened the new corridor")
+  runtime.path(state.next_path, {{position = {x = 0, y = 0}}, {position = {x = 100, y = 0}}})
+  assert(data.goals[1].path_clearance == 2)
+  for _ = 1, 100 do runtime.tick() end
+  assert(not state.character.walking_state.walking)
+end)
+
+test("preview never starts flight or spider autopilot, including migration", function()
+  for _, kind in ipairs({"flight", "spider"}) do
+    local state, spider
+    if kind == "spider" then state, spider = spider_engine(10) else state = engine(10); state.flying = true end
+    state.player_settings = Fake.player_settings({["c2m-debug-preview"] = true,
+      ["c2m-debug-margins"] = true, ["c2m-debug-curve"] = true})
+    local runtime = vm(state); runtime.init(); runtime.command(100)
+    local data = runtime.pd.get_all()[1]
+    if spider then assert(not spider.autopilot_destination, "preview immediately commanded spider") end
+    runtime.migrate()
+    for _ = 1, 120 do runtime.tick() end
+    assert(data.preview and runtime.pd.get_all()[1] == data)
+    if spider then assert(not spider.autopilot_destination) else assert(not state.character.walking_state.walking) end
+    assert(state.next_path == 0, "flight/spider preview requested an ordinary ground path")
+  end
+end)
+
+test("car preview draws recorded and usable margins and the exact curve without driving", function()
+  local state = engine(10)
+  state.player_settings = Fake.player_settings({["c2m-debug-preview"] = true,
+    ["c2m-debug-margins"] = true, ["c2m-debug-curve"] = true})
+  local vehicle = {valid = true, name = "car", type = "car", speed = 0, orientation = .25,
+    position = {x = 0, y = 0}, surface = state.surface,
+    prototype = {braking_force = 10000 / 3, weight = 700, rotation_speed = .015,
+      friction_force = .002, terrain_friction_modifier = 1,
+      collision_box = {left_top = {x = -.7, y = -1}, right_bottom = {x = .7, y = 1}}}}
+  vehicle.get_driver = function() return state.character end
+  state.player.vehicle, state.player.physical_vehicle = vehicle, vehicle
+  local runtime = vm(state); runtime.env.prototypes = {tile = {concrete = {vehicle_friction_modifier = .8}}}
+  runtime.init(); runtime.command(40, 40)
+  local path = {{position = {x = 0, y = 0}}, {position = {x = 40, y = 0}}, {position = {x = 40, y = 40}}}
+  runtime.path(1, path)
+  local data = runtime.pd.get_all()[1]
+  local geometry, available, tracking = runtime.vehicle_speed.trajectory(vehicle, path, 2)
+  local cyan, orange, magenta = 0, 0, 0
+  for _, object in ipairs(data.goals[1].rendering.path_objects) do
+    local spec = object.spec
+    assert(spec.players[1] == state.player and spec.surface == state.surface)
+    if spec.radius and spec.color.b == 1 then assert(spec.radius == 2); cyan = cyan + 1 end
+    if spec.radius and spec.color.g == .45 then
+      assert(math.abs(spec.radius - (available - tracking)) < 1e-10); orange = orange + 1
+    end
+    if spec.from and spec.color.g == .15 then magenta = magenta + 1 end
+  end
+  assert(cyan == 6 and orange == 6 and magenta > #geometry.segments, "curve or margin layers missing")
+  for _ = 1, 100 do runtime.tick() end
+  assert(not data.vehicle_trajectory and data.current_waypoint == 1, "drawing advanced controller progress")
+  assert(not vehicle.riding_state or (vehicle.riding_state.acceleration ~= 1 and vehicle.riding_state.acceleration ~= 3), "preview drove the car")
+  local objects = data.goals[1].rendering.path_objects
+  setting(runtime, state, "c2m-debug-margins", false)
+  for _, object in ipairs(objects) do assert(not object.valid, "toggle leaked old overlay") end
+  local refreshed = data.goals[1].rendering.path_objects
+  local before = #state.objects
+  runtime.pathfinding.request_paths_for_player(1, true)
+  assert(#state.objects == before, "unchanged refresh rebuilt persistent overlay")
+  runtime.events["c2m-cancel-command"]({player_index = 1, input_name = "c2m-cancel-command"})
+  for _, object in ipairs(refreshed) do assert(not object.valid, "cancel leaked overlay") end
+end)
+
+test("preview never adopts or cancels a foreign spider command matching its goal", function()
+  for _, action in ipairs({"cancel", "migrate"}) do
+    local state, spider = spider_engine(10)
+    state.player_settings = Fake.player_settings({["c2m-debug-preview"] = true})
+    rawset(spider, "destinations", {{x = 100, y = 0}})
+    local runtime = vm(state); runtime.init(); runtime.command(100)
+    assert(spider.writes == 0 and spider.autopilot_destination.x == 100)
+    if action == "cancel" then
+      runtime.events["c2m-cancel-command"]({player_index = 1, input_name = "c2m-cancel-command"})
+    else
+      runtime.migrate()
+    end
+    assert(spider.writes == 0 and spider.autopilot_destination.x == 100, action .. " erased foreign autopilot")
+  end
+end)
+
+test("moving Hovercraft preview monitors zero crossing across reload without following its path", function()
+  local state = engine(10)
+  state.player_settings = Fake.player_settings({["c2m-debug-preview"] = true})
+  local vehicle = {valid = true, name = "hovercraft", type = "car", speed = .02, orientation = .25,
+    position = {x = 0, y = 0}, surface = state.surface, prototype = state.character.prototype}
+  vehicle.get_driver = function() return state.character end
+  state.player.vehicle, state.player.physical_vehicle = vehicle, vehicle
+  local runtime = vm(state)
+  runtime.env.settings.startup["hovercraft-drifting"] = {value = "new"}
+  runtime.init(); runtime.command(100)
+  local data = runtime.pd.get_all()[1]
+  assert(data.preview_braking and runtime.events[runtime.env.defines.events.on_tick])
+  runtime.path(1, {{position = {x = 0, y = 0}}, {position = {x = 100, y = 0}}})
+  assert(data.preview_braking, "path response discarded pending stop")
+  local loaded = vm(state); loaded.env.settings.startup["hovercraft-drifting"] = {value = "new"}
+  loaded.env.game = nil; loaded.load(); loaded.env.game = Fake.game(state)
+  vehicle.speed = -.006 -- Scripted reverse thrust crossed zero between updates.
+  loaded.tick()
+  assert(vehicle.speed == 0 and vehicle.riding_state.acceleration == 0)
+  for _ = 1, 120 do loaded.tick() end
+  assert(not data.preview_braking and not loaded.events[loaded.env.defines.events.on_tick])
+  assert(data.preview and data.current_waypoint == 1 and #data.goals == 1)
+  assert(vehicle.riding_state.acceleration == 0, "settled preview retained braking thrust")
+end)
+
+test("debug colors survive queue renumbering and old paths retain their recorded margin", function()
+  local state = engine()
+  state.player_settings = Fake.player_settings({["c2m-debug-preview"] = true, ["c2m-debug-margins"] = true})
+  local runtime = vm(state); runtime.init(); runtime.command(100); runtime.command(200, 0, true)
+  runtime.path(1, {{position = {x = 0, y = 0}}, {position = {x = 100, y = 0}}})
+  runtime.path(2, {{position = {x = 100, y = 0}}, {position = {x = 200, y = 0}}})
+  local data = runtime.pd.get_all()[1]
+  local successor = data.goals[2]
+  local objects = successor.rendering.path_objects
+  local colors = {}
+  for index, object in ipairs(objects) do colors[index] = object.color end
+  runtime.pathfinding.remove_goal(1, 1, true)
+  assert(data.goals[1] == successor and successor.rendering.numbers[1].text == "1")
+  for index, object in ipairs(objects) do assert(object.valid and object.color == colors[index]) end
+  -- Turning preview off cannot silently reinterpret this already-cleared route.
+  setting(runtime, state, "c2m-debug-preview", false)
+  assert(data.preview and successor.path_clearance == .45)
+end)
+
+test("large debug overlays cap extra objects and label partial output", function()
+  local state = engine()
+  state.player_settings = Fake.player_settings({["c2m-debug-preview"] = true, ["c2m-debug-margins"] = true})
+  local runtime = vm(state); runtime.init(); runtime.command(1500)
+  local path = {}
+  for index = 1, 1500 do path[index] = {position = {x = index, y = index % 2}} end
+  runtime.path(1, path)
+  local objects = runtime.pd.get_all()[1].goals[1].rendering.path_objects
+  assert(#objects == 2 * 1499 + 4096 + 2, "debug overlay exceeded object budget")
+  local legend = objects[#objects].spec.text
+  assert(legend[4][1] == "click2move.debug-overlay-limit", "partial overlay was not labeled")
+  runtime.events["c2m-cancel-command"]({player_index = 1, input_name = "c2m-cancel-command"})
+  for _, object in ipairs(objects) do assert(not object.valid, "large preview leaked rendering") end
+end)
+
+test("debug settings ignore an actor destroyed before scheduled cleanup", function()
+  local state = engine(10); local runtime = vm(state); runtime.init(); runtime.command(100)
+  state.character.valid = false
+  state.character.type = nil
+  setmetatable(state.character, {__index = function(_, key) error("invalid entity read: " .. key) end})
+  setting(runtime, state, "c2m-debug-preview", true)
+  setting(runtime, state, "c2m-debug-margins", true)
+  runtime.tick(10)
+  assert(not runtime.pd.get_all()[1])
+end)
+
+test("obsolete saved curve anchors are discarded when reference construction changes", function()
+  local state = engine()
+  local vehicle = {valid = true, name = "car", type = "car", speed = .1, orientation = .25,
+    position = {x = 5, y = 0}, surface = state.surface,
+    prototype = {braking_force = 10000 / 3, weight = 700, rotation_speed = .015,
+      friction_force = .002, collision_box = state.character.prototype.collision_box}}
+  vehicle.get_driver = function() return state.character end
+  state.player.vehicle, state.player.physical_vehicle = vehicle, vehicle
+  local runtime = vm(state); runtime.env.prototypes = {tile = {}}; runtime.init(); runtime.command(40, 40)
+  local path = {{position = {x = 0, y = 0}}, {position = {x = 40, y = 0}}, {position = {x = 40, y = 40}}}
+  runtime.path(1, path)
+  local data = runtime.pd.get_all()[1]
+  local expected = {runtime.vehicle_speed.control(vehicle, path, 1, 2, .1, data)}
+  local expected_progress = data.vehicle_trajectory.s
+  for _, revision in ipairs({false, 2}) do
+    data.vehicle_trajectory = {path = path, entity = vehicle, s = 10000, revision = revision or nil}
+    local actual = {runtime.vehicle_speed.control(vehicle, path, 1, 2, .1, data)}
+    assert(math.abs(actual[1] - expected[1]) < 1e-10)
+    assert(math.abs(actual[2].x - expected[2].x) < 1e-10 and math.abs(actual[2].y - expected[2].y) < 1e-10)
+    assert(math.abs(data.vehicle_trajectory.s - expected_progress) < 1e-10)
+    assert(data.vehicle_trajectory.revision == 3)
+  end
 end)
 
 for _, entry in ipairs(tests) do entry[2](); print("PASS " .. entry[1]) end

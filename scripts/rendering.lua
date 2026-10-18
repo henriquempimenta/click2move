@@ -2,6 +2,8 @@
 -- drawn twice: "game" objects show in the world and close remote view, while
 -- "chart" objects show once remote view zooms out to the map.
 local Util = require("scripts/util")
+local Config = require("scripts/config")
+local DebugRendering = require("scripts/debug-rendering")
 local Rendering = {}
 
 local RENDER_MODES = {"game", "chart"}
@@ -71,11 +73,21 @@ local function draw_path(player, data, goal, index, surface)
   Util.safe_destroy_renderings(state.path_objects)
   state.path_objects = {}
   state.path = goal.path
+  state.drawn = true
+  local config = Config.get(player.index)
+  state.debug_margins, state.debug_curve = config.debug_margins, config.debug_curve
+  state.preview = data.preview
   local vehicle = data.move_entity and data.move_entity.type ~= "character"
-  local color = copy_color(player.color, (vehicle and 0.5 or 0.9) * (index > 1 and 0.5 or 1))
+  local debug = config.debug_margins or config.debug_curve
+  local color = debug and {r = 1, g = 0.85, b = 0.1, a = 0.95} or copy_color(player.color, (vehicle and 0.5 or 0.9) * (index > 1 and 0.5 or 1))
   local points = {}
   for _, waypoint in ipairs(goal.path or {}) do
     if waypoint.position then points[#points + 1] = waypoint.position end
+  end
+  if debug and #points == 0 and data.is_straight_line_move then
+    points = {index == 1 and data.move_entity.position or data.goals[index - 1].position, goal.position}
+  elseif debug and vehicle and data.move_entity.type == "spider-vehicle" and #points == 1 then
+    table.insert(points, 1, index == 1 and data.move_entity.position or data.goals[index - 1].position)
   end
   if #points == 0 then return end
   local polylines = {game = points, chart = merge_straight_runs(points)}
@@ -88,12 +100,15 @@ local function draw_path(player, data, goal, index, surface)
         render_mode = render_mode, time_to_live = 0
       }
     end
-    if #goal.path == 1 then
+    if #points == 1 then
       state.path_objects[#state.path_objects + 1] = rendering.draw_circle{
         color = color, radius = 0.3, target = points[1], surface = surface,
         players = {player}, render_mode = render_mode, time_to_live = 0
       }
     end
+  end
+  if debug then
+    DebugRendering.draw(player, data, goal, merge_straight_runs(points), surface, state.path_objects)
   end
 end
 
@@ -126,14 +141,20 @@ function Rendering.render_goal(player_index, data, goal, index)
       end
     end
     state.index = index
-    for _, object in ipairs(state.path_objects) do
-      if object.valid then
-        local vehicle = entity and entity.type ~= "character"
-        object.color = copy_color(player.color, (vehicle and 0.5 or 0.9) * (index > 1 and 0.5 or 1))
+    if not state.debug_margins and not state.debug_curve then
+      for _, object in ipairs(state.path_objects) do
+        if object.valid then
+          local vehicle = entity and entity.type ~= "character"
+          object.color = copy_color(player.color, (vehicle and 0.5 or 0.9) * (index > 1 and 0.5 or 1))
+        end
       end
     end
   end
-  if state.path ~= goal.path then draw_path(player, data, goal, index, surface) end
+  local config = Config.get(player_index)
+  if not state.drawn or state.path ~= goal.path or state.debug_margins ~= config.debug_margins
+      or state.debug_curve ~= config.debug_curve or state.preview ~= data.preview then
+    draw_path(player, data, goal, index, surface)
+  end
 end
 
 function Rendering.render_paths_for_player(player_index, player_move_data)
