@@ -9,9 +9,10 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  check:
     runs-on: ubuntu-latest
-    environment: Portal
+    outputs:
+      factorio_versions: ${{ steps.targets.outputs.factorio_versions }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -24,18 +25,82 @@ jobs:
       - name: Check Lua syntax, regression tests, and packaging
         run: python3 tools/check.py
 
+      - name: Build every game version before uploading any
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 tools/package.py --expected-version "${RELEASE_TAG#v}"
+
+      - name: List game versions
+        id: targets
+        run: echo "factorio_versions=$(jq -c '.factorio_versions' targets.json)" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: check
+    runs-on: ubuntu-latest
+    environment: Portal
+    strategy:
+      # One upload at a time; a failed game version can be re-run without repeating the others.
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        factorio_version: ${{ fromJSON(needs.check.outputs.factorio_versions) }}
+    name: publish (Factorio ${{ matrix.factorio_version }})
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Build and verify release archive
         id: package
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          FACTORIO_VERSION: ${{ matrix.factorio_version }}
         run: |
           set -euo pipefail
           VERSION="${RELEASE_TAG#v}"
-          ZIP_FILE=$(python3 tools/package.py --expected-version "$VERSION")
+          ZIP_FILE=$(python3 tools/package.py --expected-version "$VERSION" --target "$FACTORIO_VERSION")
           echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
           echo "mod_name=$(jq -r '.name' info.json)" >> "$GITHUB_OUTPUT"
 
+      - name: Check existing release
+        id: existing
+        env:
+          MOD_NAME: ${{ steps.package.outputs.mod_name }}
+          ZIP_FILE: ${{ steps.package.outputs.zip_file }}
+        run: |
+          set -euo pipefail
+          # A re-run must not upload twice: an identical published ZIP counts as done, a different one is a conflict.
+          VERSION=$(basename "$ZIP_FILE" .zip)
+          VERSION=${VERSION#"${MOD_NAME}_"}
+          BODY_FILE=$(mktemp)
+          trap 'rm -f "$BODY_FILE"' EXIT
+          HTTP_CODE=$(curl --silent --show-error --output "$BODY_FILE" --write-out '%{http_code}' \
+            "https://mods.factorio.com/api/mods/$MOD_NAME/full")
+          if [ "$HTTP_CODE" = 404 ]; then
+            PUBLISHED_SHA1=""
+          elif [ "$HTTP_CODE" = 200 ]; then
+            PUBLISHED_SHA1=$(jq -er --arg version "$VERSION" '
+              if (.releases | type) != "array" then error("missing release list") else . end
+              | [.releases[] | select(.version == $version)]
+              | if length == 0 then "" elif length == 1 and (.[0].sha1 | type) == "string" then .[0].sha1
+                else error("unexpected release record") end' "$BODY_FILE")
+          else
+            echo "Release lookup failed with HTTP $HTTP_CODE." >&2
+            exit 1
+          fi
+          LOCAL_SHA1=$(sha1sum "$ZIP_FILE" | cut -d ' ' -f 1)
+          if [ -z "$PUBLISHED_SHA1" ]; then
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          elif [ "$PUBLISHED_SHA1" = "$LOCAL_SHA1" ]; then
+            echo "Version $VERSION is already published with identical contents; skipping upload."
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version $VERSION is already published with different contents (portal SHA-1 $PUBLISHED_SHA1, built $LOCAL_SHA1)." >&2
+            echo "Release a new version instead of replacing a published one." >&2
+            exit 1
+          fi
+
       - name: Initialize upload
+        if: steps.existing.outputs.published == 'false'
         id: init
         env:
           API_KEY: ${{ secrets.API_KEY }}
@@ -66,6 +131,7 @@ jobs:
           echo "upload_url=$UPLOAD_URL" >> "$GITHUB_OUTPUT"
 
       - name: Upload and finish release
+        if: steps.existing.outputs.published == 'false'
         env:
           UPLOAD_URL: ${{ steps.init.outputs.upload_url }}
           ZIP_FILE: ${{ steps.package.outputs.zip_file }}

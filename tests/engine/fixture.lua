@@ -105,7 +105,7 @@ local function setup()
   storage.c2m_engine_fixture.pending_goal = data.goals[2]
   assert(data.goals[2].path_id, "native queued path not submitted")
   PlayerData.notify_changed()
-  for model_index, name in ipairs({"hovercraft", "missile-hovercraft", "electric-hovercraft", "laser-hovercraft"}) do
+  for model_index, name in ipairs(C2M_NATIVE_HOVERCRAFTS) do
     for case_index, approach in ipairs({"forward", "reverse", "near"}) do
       local position = {x = -100 + (model_index - 1) * 75, y = -30 + (case_index - 1) * 30}
       local craft = surface.create_entity{name = name, position = position, force = player.force, raise_built = true}

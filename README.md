@@ -49,7 +49,8 @@ Enable **Debug: Preview Without Moving**, then middle-click a destination to cal
 ## Known Issues
 
 *   **Flickering with Mech Armor**: When moving horizontally with mech armor, the character sprite may flicker.
-*   **Vehicle Steering**: Steering can overshoot or oscillate, particularly around tight turns or with vehicles that have strong inertia. At an update interval of 60 ticks a car holds one input for a whole second and can still circle tight corners or touch walls. Vehicles whose prototypes do not describe braking and turning, and scripted vehicles such as Hovercrafts in drift mode, are not slowed for corners as precisely.
+*   **Vehicle Steering**: Steering can overshoot or oscillate, particularly around tight turns or with vehicles that have strong inertia. Vehicles whose prototypes do not describe braking and turning, and scripted vehicles such as Hovercrafts in drift mode, are not slowed for corners as precisely.
+*   **Hovercrafts on Factorio 2.0**: Hovercrafts compatibility is optional. With Hovercrafts 2.0.x, New drift mode is not supported: it reports reverse movement as forward speed, so a reversing hovercraft can accelerate instead of stopping, and a hovercraft on a pathfinder route can stop short and abandon its destination. Off and Old drift work with the standard and missile hovercrafts. The electric and laser hovercrafts, which Hovercrafts 2.0.x adds only with the Laser Tanks mod, have not been tested. On Factorio 2.1, Hovercrafts 2.1.4 works in every drift mode.
 *   **Spidertron Remote View**: Ordering selected spidertrons from remote view is not supported yet. Remote-view clicks still control the player character or current vehicle.
 
 ## Mod Settings
@@ -91,9 +92,17 @@ Stuck recovery lasts 30 game ticks for a character slide and 60 game ticks for a
 
 Run `python3 tools/check.py` from the mod directory to check Lua syntax, run every `tests/*.lua` regression script, and verify packaging. Tests that boot the real `control.lua` share the fake engine in `tests/support/fake-factorio.lua`; add new events and engine APIs there. Python 3.10 or newer and Lua with `luac` are required; CI uses Lua 5.2. Install `jq` to include mocked publish-workflow tests.
 
-Build a local release archive with `python3 tools/package.py`. It includes only the files listed in `package-manifest.json`, checks local Lua dependencies and assets, and verifies the finished ZIP. Add new runtime files to the manifest when introducing them. Downloaded mods, tests, editor files, and tooling are excluded.
+Build local release archives with `python3 tools/package.py`. It includes only the files listed in `package-manifest.json`, checks local Lua dependencies and assets, and verifies each finished ZIP. Add new runtime files to the manifest when introducing them. Downloaded mods, tests, editor files, and tooling are excluded.
 
-Optional engine checks require a Factorio 2.1 executable and an unpacked Hovercrafts 2.1.4 directory:
+### Releasing for several Factorio versions
+
+`master` is the only source branch. `targets.json` lists the supported Factorio versions, and `tools/package.py` builds one ZIP for each (`--target 2.0` builds just one). Every ZIP gets that game version's `factorio_version` and `base` dependency, and a version with the game version in its last part: `100 × line + patch`, where the line is 210 for Factorio 2.1 and 200 for 2.0. Source version `0.1.16` therefore ships as `0.1.21016` and `0.1.20016`. The patch must stay below 100. Changelog entries from `0.1.16` (`first_version` in `targets.json`) onwards are renumbered the same way; older entries keep the version they were published as.
+
+To release, set `info.json` and the newest `changelog.txt` entry to the new version, commit, and push tag `v<version>`, such as `v0.1.16`. The publish workflow runs the checks, builds every game version, then uploads each ZIP to the Mod Portal one at a time. A failed upload can be re-run on its own from the workflow page. Before uploading, each job compares its ZIP's SHA-1 with the Portal's release of the same version: an identical release is skipped as already published, and a different one stops the job, because a published version cannot be replaced. CI rebuilds are byte-identical, but local builds can differ when Python uses another zlib, such as zlib-ng on Arch-based systems.
+
+When a game version needs different code, put the replacement file under `targets/<factorio version>/` at the same path, for example `targets/2.0/scripts/vehicle-braking.lua`. It replaces the shared file in that version's ZIP only, and must replace a file listed in `package-manifest.json`. For small differences, prefer a runtime check such as `script.active_mods.base`. To support another Factorio version, add it to `targets.json`.
+
+Optional engine checks require a Factorio executable and an unpacked Hovercrafts directory for the same game version: 2.1.4 for Factorio 2.1, 2.0.4 for 2.0. They install the build for the first version in `targets.json`; add `--target 2.0` when the executable is Factorio 2.0:
 
 ```sh
 python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --hovercraft /path/to/Hovercrafts_2.1.4

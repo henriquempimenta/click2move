@@ -20,9 +20,9 @@
 --        from the next. Steering along only the larger axis, as 0.1.15 did,
 --        traps a 1.125 character at the default margin.
 -- Arrived actors are parked out of the way, so they cannot block a later route.
--- C2M_NATIVE_INTERVAL (1, 10 or 60) is prepended by run.py. At 60 a car holds
--- one steering input for a second and circles tight corners, as 0.1.15 did,
--- so only the characters run there.
+-- C2M_NATIVE_INTERVAL (1, 10 or 60) is prepended by run.py. At 60 a car would
+-- hold one steering input for a second and circle tight corners, as 0.1.15 did,
+-- unless it is controlled every tick near them.
 local Config = require("scripts/config")
 local Pathfinding = require("scripts/pathfinding")
 local PlayerData = require("scripts/player-data")
@@ -71,10 +71,7 @@ for _, bonus in ipairs({.5, 2}) do
   end
 end
 end
-local CASES = {}
-for _, spec in ipairs(ALL_CASES) do
-  if spec[1] == "character" or C2M_NATIVE_INTERVAL < 60 then CASES[#CASES + 1] = spec end
-end
+local CASES = ALL_CASES
 local get_config = Config.get
 Config.get = function(index)
   local config = get_config(index and 0 or nil)

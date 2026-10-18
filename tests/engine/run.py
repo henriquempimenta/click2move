@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Optional native Factorio save/load and Hovercraft physics checks.
 
-Run: python3 tests/engine/run.py --factorio /path/to/factorio --hovercraft /path/to/Hovercrafts_2.1.4
+Run: python3 tests/engine/run.py --factorio /path/to/factorio --hovercraft /path/to/Hovercrafts_<version>
+Add --target 2.0 when the executable is Factorio 2.0.
 Uses only temporary config/mod/save directories. Production movement schedules
 are captured and player/UI calls are mocked because headless saves have no
 players. Entities, physics, rendering objects, storage and saves are native.
@@ -19,7 +20,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
-from package import package_files
+from package import load_targets, target_files
 
 SHIM = '''local c2m_test_bootstrap = script
 local c2m_test_init_handler, c2m_test_load_handler, c2m_test_config_handler, c2m_test_tick_handler
@@ -37,6 +38,29 @@ script.on_nth_tick = function(interval, handler) c2m_test_nth_handlers[interval]
 '''
 
 
+FACTORIO_VERSION = load_targets(ROOT)[0][0]
+
+
+# Supported drift modes and default vehicles for each Hovercrafts line. In 2.0.x the
+# electric and laser hovercrafts also need the Laser Tanks mod, and New drift is
+# unsupported: it reports reverse movement as positive speed, so braking a reversing
+# hovercraft accelerates it. 2.0.x also ignores script_raised_built, so the test
+# registers script-created vehicles itself.
+HOVERCRAFT_PROFILES = {
+    "2.1": (("new", "off", "old", "low-latency", "low-latency-b"),
+            ("hovercraft", "missile-hovercraft", "electric-hovercraft", "laser-hovercraft"), False),
+    "2.0": (("off", "old"), ("hovercraft", "missile-hovercraft"), True),
+}
+
+
+def install_mod(mod):
+    """Write the packaged files for the selected game version into an unpacked mod directory."""
+    for name, content in target_files(ROOT, FACTORIO_VERSION).items():
+        target = mod / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+
 def run(command, log_path, timeout=120):
     with log_path.open("w") as log_file:
         result = subprocess.run(command, stdout=log_file, stderr=subprocess.STDOUT, timeout=timeout)
@@ -47,6 +71,7 @@ def run(command, log_path, timeout=120):
 
 
 def main():
+    global FACTORIO_VERSION
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--factorio", type=Path, required=True)
     parser.add_argument("--hovercraft", type=Path)
@@ -58,7 +83,10 @@ def main():
     parser.add_argument("--profile-build", action="store_true", help="Profile trajectory construction in native Factorio (reports times without hardware-specific deadlines)")
     parser.add_argument("--vulcanus", action="store_true", help="Drive fast cars across generated Vulcanus terrain (needs Space Age)")
     parser.add_argument("--space-age", action="store_true", help="Enable Space Age and include native powered mech armor flight")
+    parser.add_argument("--target", choices=load_targets(ROOT)[0], default=FACTORIO_VERSION,
+                        help="Game version to package the mod for; must match the --factorio executable")
     args = parser.parse_args()
+    FACTORIO_VERSION = args.target
     factorio = args.factorio.resolve()
     data = factorio.parents[2] / "data"
     workspace = Path(tempfile.mkdtemp(prefix="c2m-native-"))
@@ -86,23 +114,35 @@ def main():
         return
     if args.hovercraft is None:
         parser.error("--hovercraft is required unless --waypoints is selected")
-    for mode in ("new", "off", "old", "low-latency", "low-latency-b"):
+    hover_info = json.loads((args.hovercraft / "info.json").read_text())
+    if hover_info["factorio_version"] != FACTORIO_VERSION:
+        parser.error(f"Hovercrafts {hover_info['version']} is for Factorio {hover_info['factorio_version']}, not {FACTORIO_VERSION}")
+    modes, models, register_built = HOVERCRAFT_PROFILES[hover_info["factorio_version"]]
+    cases = len(models) * 3
+    for mode in modes:
         root = workspace / mode
         mods = root / "mods"
         mod = mods / "click2move"
         mod.mkdir(parents=True)
-        for name in package_files(ROOT):
-            target = mod / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(ROOT / name, target)
+        install_mod(mod)
         control = mod / "control.lua"
-        control.write_text(SHIM + control.read_text() + "\n" + (ROOT / "tests/engine/fixture.lua").read_text())
-        shutil.copytree(args.hovercraft, mods / "Hovercrafts_2.1.4")
-        hover_control = mods / "Hovercrafts_2.1.4/control.lua"
+        control.write_text(SHIM + control.read_text() + "\n"
+            + "local C2M_NATIVE_HOVERCRAFTS = {" + ", ".join(f'"{model}"' for model in models) + "}\n"
+            + (ROOT / "tests/engine/fixture.lua").read_text())
+        # Factorio requires a versioned mod folder name to match its info.json.
+        hover_mod = mods / f"Hovercrafts_{hover_info['version']}"
+        shutil.copytree(args.hovercraft, hover_mod)
+        hover_control = hover_mod / "control.lua"
         with hover_control.open("a") as source:
             source.write('''
 -- Test-only state seeding: Click2Move's on_init runs before Hovercrafts' on_init.
+local c2m_test_register_built = ''' + ("true" if register_built else "false") + '''
 remote.add_interface("c2m-native-hovercraft", {initialize = function(vehicle)
+  if c2m_test_register_built and not storage.hovercrafts[vehicle.unit_number] then
+    -- The record Hovercrafts 2.0.x writes in on_built_entity.
+    storage.hovercrafts[vehicle.unit_number] = {entity = vehicle, drift = {x = 0, y = 0}, last_speed = 0,
+      last_pos = vehicle.position, position = vehicle.position, idle_ticks = 0}
+  end
   local state = assert(storage.hovercrafts[vehicle.unit_number], "hovercraft not registered")
   local angle = vehicle.orientation * 2 * math.pi
   state.drift = {x = math.sin(angle) * vehicle.speed, y = -math.cos(angle) * vehicle.speed}
@@ -113,7 +153,7 @@ end})
         defaults = mods / "c2m-engine-settings"
         defaults.mkdir()
         (defaults / "info.json").write_text(json.dumps({"name": "c2m-engine-settings", "version": "1.0.0",
-            "title": "Click2Move native fixture settings", "author": "test", "factorio_version": "2.1",
+            "title": "Click2Move native fixture settings", "author": "test", "factorio_version": FACTORIO_VERSION,
             "dependencies": ["base", "click2move", "Hovercrafts"]}))
         (defaults / "settings-updates.lua").write_text(
             f'data.raw["string-setting"]["hovercraft-drifting"].default_value = "{mode}"\n')
@@ -129,10 +169,10 @@ end})
         run(common + ["--create", str(save), "--map-gen-seed", "1"], root / "create.log")
         output = run(common + ["--benchmark", str(save), "--benchmark-ticks", "7200", "--benchmark-runs", "1"], root / "reload.log")
         if not all(marker in output for marker in ("C2M_NATIVE_RELOAD_OK", "C2M_NATIVE_CALLBACK_OK",
-                "C2M_NATIVE_SCHEDULER_OK", "C2M_NATIVE_STOPPING_OK 12 " + mode)):
+                "C2M_NATIVE_SCHEDULER_OK", f"C2M_NATIVE_STOPPING_OK {cases} {mode}")):
             raise RuntimeError(f"Missing native assertions for {mode}; see {root / 'reload.log'}")
-        print(f"PASS {mode}: real save/load, restored braking/queue/render state, 12 stopping cases", flush=True)
-        if mode == "new":
+        print(f"PASS {mode}: real save/load, restored braking/queue/render state, {cases} stopping cases", flush=True)
+        if mode == modes[0]:
             info = json.loads((mod / "info.json").read_text())
             version = [int(part) for part in info["version"].split(".")]
             version[2] += 1
@@ -142,10 +182,10 @@ end})
                 "local c2m_test_expect_migration = true"))
             output = run(common + ["--benchmark", str(save), "--benchmark-ticks", "7200", "--benchmark-runs", "1"], root / "migration.log")
             if not all(marker in output for marker in ("C2M_NATIVE_RELOAD_OK", "C2M_NATIVE_CALLBACK_OK",
-                    "C2M_NATIVE_SCHEDULER_OK", "C2M_NATIVE_STOPPING_OK 12 new")):
+                    "C2M_NATIVE_SCHEDULER_OK", f"C2M_NATIVE_STOPPING_OK {cases} {mode}")):
                 raise RuntimeError(f"Configuration migration assertions failed; see {root / 'migration.log'}")
             print("PASS configuration migration preserves saved route and mocked disabled preference", flush=True)
-    print("PASS 60 native Hovercraft stopping scenarios, five save/load checks and configuration migration", flush=True)
+    print(f"PASS {cases * len(modes)} native Hovercraft stopping scenarios, {len(modes)} save/load checks and configuration migration", flush=True)
 
 
 def expansion_mods(enabled):
@@ -161,10 +201,7 @@ def run_waypoints(factorio, data, workspace, space_age):
         mods = root / "mods"
         mod = mods / "click2move"
         mod.mkdir(parents=True)
-        for name in package_files(ROOT):
-            target = mod / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(ROOT / name, target)
+        install_mod(mod)
         control = mod / "control.lua"
         fixture = (ROOT / "tests/engine/waypoints.lua").read_text()
         control.write_text(SHIM + f"\nlocal C2M_NATIVE_INTERVAL = {interval}\n"
@@ -192,10 +229,7 @@ def run_spiders(factorio, data, workspace):
     mods = workspace / "spiders" / "mods"
     mod = mods / "click2move"
     mod.mkdir(parents=True)
-    for name in package_files(ROOT):
-        target = mod / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / name, target)
+    install_mod(mod)
     control = mod / "control.lua"
     control.write_text(control.read_text() + "\n" + (ROOT / "tests/engine/spiders.lua").read_text())
     (mods / "mod-list.json").write_text(json.dumps({"mods": [
@@ -219,17 +253,12 @@ def run_spiders(factorio, data, workspace):
 
 
 def run_corners(factorio, data, workspace):
-    # At interval 60 a car holds one steering input for a second and circles
-    # tight corners, as 0.1.15 did, so only the character cases run there.
     total = 0
-    for interval, cases in ((1, 210), (10, 210), (60, 208)):
+    for interval, cases in ((1, 210), (10, 210), (60, 210)):
         mods = workspace / f"corners-{interval}" / "mods"
         mod = mods / "click2move"
         mod.mkdir(parents=True)
-        for name in package_files(ROOT):
-            target = mod / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(ROOT / name, target)
+        install_mod(mod)
         control = mod / "control.lua"
         control.write_text(f"local C2M_NATIVE_INTERVAL = {interval}\n" + control.read_text() + "\n"
             + (ROOT / "tests/engine/corners.lua").read_text())
@@ -258,10 +287,7 @@ def run_fast_cars(factorio, data, workspace):
         mods = workspace / f"fast-cars-{interval}" / "mods"
         mod = mods / "click2move"
         mod.mkdir(parents=True)
-        for name in package_files(ROOT):
-            target = mod / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(ROOT / name, target)
+        install_mod(mod)
         control = mod / "control.lua"
         control.write_text(f"local C2M_NATIVE_INTERVAL = {interval}\n" + control.read_text() + "\n"
             + (ROOT / "tests/engine/fast-cars.lua").read_text())
@@ -292,10 +318,7 @@ def run_profile_build(factorio, data, workspace):
     mods = root / "mods"
     mod = mods / "click2move"
     mod.mkdir(parents=True)
-    for name in package_files(ROOT):
-        target = mod / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / name, target)
+    install_mod(mod)
     # Profilers only report duration; their values never affect game state.
     (mod / "control.lua").write_text((ROOT / "tests/engine/build-profile.lua").read_text())
     (mods / "mod-list.json").write_text(json.dumps({"mods": [
@@ -352,10 +375,7 @@ def run_physics(factorio, data, workspace):
     mods = root / "mods"
     mod = mods / "click2move"
     mod.mkdir(parents=True)
-    for name in package_files(ROOT):
-        target = mod / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / name, target)
+    install_mod(mod)
     # The fixture imports the production speed planner directly. It uses native
     # entities and event scheduling and does not install any player/UI shims.
     (mod / "control.lua").write_text((ROOT / "tests/engine/physics.lua").read_text())
@@ -405,10 +425,7 @@ def run_vulcanus(factorio, data, workspace):
         mods = workspace / f"vulcanus-{interval}" / "mods"
         mod = mods / "click2move"
         mod.mkdir(parents=True)
-        for name in package_files(ROOT):
-            target = mod / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(ROOT / name, target)
+        install_mod(mod)
         control = mod / "control.lua"
         control.write_text(f"local C2M_NATIVE_INTERVAL = {interval}\n" + control.read_text() + "\n"
             + (ROOT / "tests/engine/vulcanus.lua").read_text())

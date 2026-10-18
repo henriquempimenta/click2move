@@ -1,4 +1,5 @@
 """Execute the workflow's actual upload shell steps against a fake curl."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -30,7 +31,7 @@ pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text(os.environ['CU
 print(os.environ['CURL_STATUS'], end='')
 """)
         curl.chmod(0o755)
-        self.archive = self.root / "mod.zip"
+        self.archive = self.root / "click2move_0.1.20016.zip"
         self.archive.write_bytes(b"test archive")
         self.key = "test-api-key-never-print"
         self.url = "https://upload.example.test/credential%0A-secret"
@@ -86,6 +87,47 @@ print(os.environ['CURL_STATUS'], end='')
         result = self.run_step("Initialize upload", {"upload_url": self.url}, status=403)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn(self.url, result.stdout + result.stderr)
+
+    def check_existing(self, releases, status=200):
+        result = self.run_step("Check existing release", {"name": "click2move", "releases": releases}, status)
+        published = self.output.read_text() if self.output.exists() else ""
+        return result, published
+
+    def release(self, version, content):
+        return {"version": version, "sha1": hashlib.sha1(content).hexdigest()}
+
+    def test_unpublished_version_is_uploaded(self):
+        result, published = self.check_existing([self.release("0.1.21016", b"test archive")])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(published, "published=false\n")
+
+    def test_identical_published_release_is_skipped(self):
+        result, published = self.check_existing([self.release("0.1.20016", b"test archive")])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(published, "published=true\n")
+        self.assertIn("identical contents", result.stdout)
+
+    def test_different_published_release_is_a_conflict(self):
+        result, published = self.check_existing([self.release("0.1.20016", b"other archive")])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(published, "")
+        self.assertIn("different contents", result.stderr)
+
+    def test_new_mod_is_uploaded(self):
+        result, published = self.check_existing([], status=404)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(published, "published=false\n")
+
+    def test_failed_or_malformed_lookup_stops_the_upload(self):
+        for releases, status in (([], 500), ("not a list", 200), ([{"version": "0.1.20016"}], 200),
+                                 ([self.release("0.1.20016", b"test archive")] * 2, 200)):
+            with self.subTest(status=status, releases=releases):
+                self.output.unlink(missing_ok=True)
+                result, published = self.check_existing(releases, status)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(published, "")
+        result = self.run_step("Check existing release", "not json")
+        self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

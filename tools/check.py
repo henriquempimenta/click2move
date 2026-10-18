@@ -19,6 +19,7 @@ def main():
     tests = sorted(root.glob("tests/*.lua"))
     support = sorted(root.glob("tests/support/*.lua"))
     runtime = [root / name for name in package_files(root) if name.endswith(".lua")]
+    runtime += sorted(root.glob("targets/*/**/*.lua"))
     for source in runtime + support + tests:
         subprocess.run([luac, "-p", str(source)], cwd=root, check=True)
     print(f"Lua syntax passed for {len(runtime)} runtime files and {len(tests)} test scripts", flush=True)
