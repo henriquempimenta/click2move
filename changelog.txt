@@ -7,7 +7,10 @@ Version: 0.1.16
     - Take corners on a racing line that swings out to the far side of the cleared corridor before and after the corner and cuts in at the apex, roughly doubling the turning radius of a curve that only cuts the inside. Corners the pathfinder cut into 45-degree steps are taken the same way.
     - Smooth a lane shift round an obstacle, two opposite corners joined by a short leg, into one wide curve across the corridor, instead of slowing for each corner. Every such curve is checked against the original path within a fixed work budget.
     - Plan tank cornering with the turning rate measured for its fuel and powered exoskeletons, and braking with the strength measured for the fuel's top speed bonus. A last item of fuel only counts while it holds twenty seconds of full throttle, so running out cannot leave a vehicle too fast for its brakes.
+  Changes:
+    - Reduce temporary tables and repeated engine reads during vehicle control, path projection, shortcut checks, clearance certification and curve drawing. Share a fresh vehicle model within each movement update while continuing to read live fuel, friction and equipment power on later updates.
   Bugfixes:
+    - Score bend replacements using the actual radii of their surviving arcs, including when a negligible correction arc is omitted. Reproject saved curve progress after the construction change.
     - Share a deterministic work budget across curve refinement, counting rejected construction attempts as well as clearance checks. Avoid repeated bridge searches and speed up clearance proofs while preserving their safety checks and driving performance. Required processing of very large paths still grows with their length.
     - Avoid braking again for an already accepted corner on zero-margin routes, and control tight explicit corners every tick. Keep the existing corner speed limits and path clearance.
     - Ignore missing or invalid movement entities when drawing debug overlays.

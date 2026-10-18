@@ -52,33 +52,67 @@ local function tile_friction()
   return min_tile_friction
 end
 
--- The fuel's acceleration and top speed multipliers, the weakest of the fuel
--- burning and the fuel waiting to burn. Braking burns no fuel, so a vehicle
--- that is told to plan without its fuel still brakes with it while it slows.
--- Without fuel waiting, the burning item only counts while it holds at least
--- FUEL_RESERVE_TICKS of full throttle.
-local function fuel_multipliers(vehicle, prototype)
+-- Prototypes are immutable during one script VM's lifetime. Cache only their
+-- constants; fuel, equipment power and entity modifiers are always live reads.
+local prototype_cache = setmetatable({}, {__mode = "k"})
+local function prototype_data(prototype)
+  if not prototype then return nil end
+  -- Native LuaObject wrappers can be recreated between reads. Their immutable
+  -- prototype name is the stable identity; table mocks may have no name.
+  local key = prototype.name or prototype
+  local cached = prototype_cache[key]
+  if cached then return cached end
+  local braking, weight, rotation = prototype.braking_force, prototype.weight, prototype.rotation_speed
+  local box, padding, body = prototype.collision_box, 0, 0
+  if box and box.left_top and box.right_bottom then
+    local x = math.max(-box.left_top.x, box.right_bottom.x)
+    local y = math.max(-box.left_top.y, box.right_bottom.y)
+    padding, body = math.sqrt(x * x + y * y) - math.min(x, y), math.max(x, y)
+  end
+  local source = prototype.burner_prototype
+  local terrain = prototype.terrain_friction_modifier or 1
+  local valid = braking and weight and rotation and weight > 0 and braking > 0 and rotation > 0
+  cached = {
+    valid = valid,
+    brake = braking and weight and weight > 0 and braking / weight * BRAKING_SCALE or 0,
+    rotation = rotation, tank = prototype.tank_driving == true,
+    friction = prototype.friction_force or 0,
+    terrain_friction = valid and math.max(0, 1 + (tile_friction() - 1) * terrain) or 0,
+    consumption = prototype.consumption or 0, effectivity = source and source.effectivity or 1,
+    padding = padding, body = body
+  }
+  prototype_cache[key] = cached
+  return cached
+end
+
+local function item_multipliers(item, quality)
+  local level = quality and quality.level or 0
+  return (item.fuel_acceleration_multiplier or 1)
+      + (item.fuel_acceleration_multiplier_quality_bonus or 0) * level,
+    (item.fuel_top_speed_multiplier or 1)
+      + (item.fuel_top_speed_multiplier_quality_bonus or 0) * level
+end
+
+-- The weakest multipliers of the burning fuel and the waiting inventory.
+-- Braking burns no fuel. Without another item waiting, the current one counts
+-- only while it holds at least FUEL_RESERVE_TICKS of full throttle.
+local function fuel_multipliers(vehicle, constants)
   local burner = vehicle.burner
   local burning = burner and burner.currently_burning
   if not (burning and burning.name) then return 1, 1 end
-  local inventory = vehicle.get_fuel_inventory and vehicle.get_fuel_inventory()
-  local acceleration, top_speed, waiting = math.huge, math.huge, false
-  local function consider(item, quality)
-    local level = quality and quality.level or 0
-    acceleration = math.min(acceleration, (item.fuel_acceleration_multiplier or 1)
-      + (item.fuel_acceleration_multiplier_quality_bonus or 0) * level)
-    top_speed = math.min(top_speed, (item.fuel_top_speed_multiplier or 1)
-      + (item.fuel_top_speed_multiplier_quality_bonus or 0) * level)
-  end
-  consider(burning.name, burning.quality)
+  local get_inventory = vehicle.get_fuel_inventory
+  local inventory = get_inventory and get_inventory()
+  local acceleration, top_speed = item_multipliers(burning.name, burning.quality)
+  local waiting = false
   for slot = 1, inventory and #inventory or 0 do
     local stack = inventory[slot]
-    if stack.valid_for_read then consider(stack.prototype, stack.quality); waiting = true end
+    if stack.valid_for_read then
+      local a, t = item_multipliers(stack.prototype, stack.quality)
+      acceleration, top_speed, waiting = math.min(acceleration, a), math.min(top_speed, t), true
+    end
   end
   if not waiting then
-    local usage = prototype.consumption or 0
-    local source = prototype.burner_prototype
-    local effectivity = source and source.effectivity or 1
+    local usage, effectivity = constants.consumption, constants.effectivity
     if usage <= 0 or effectivity <= 0
         or (burner.remaining_burning_fuel or 0) < usage / effectivity * FUEL_RESERVE_TICKS then
       return 1, 1
@@ -89,27 +123,36 @@ end
 
 ---@return {brake: number, friction: number, rotation: number, tank: boolean}?
 local function vehicle_model(vehicle)
-  local prototype = vehicle.prototype
-  if not prototype then return nil end
-  local braking, weight, rotation = prototype.braking_force, prototype.weight, prototype.rotation_speed
-  if not (braking and weight and rotation and weight > 0 and braking > 0 and rotation > 0) then return nil end
-  local acceleration, top_speed = fuel_multipliers(vehicle, prototype)
-  local tank = prototype.tank_driving == true
-  if tank then
-    -- Turns per tick at any speed; a car's rate per square root of speed
-    -- does not depend on fuel or equipment.
+  local constants = prototype_data(vehicle.prototype)
+  if not (constants and constants.valid) then return nil end
+  local acceleration, top_speed = fuel_multipliers(vehicle, constants)
+  local rotation = constants.rotation
+  if constants.tank then
     local grid = vehicle.grid
     local bonus = grid and grid.movement_bonus or 0
     rotation = rotation * math.max(0.75, 0.75 + 0.25 * acceleration * (1 + bonus))
   end
-  local terrain = prototype.terrain_friction_modifier or 1
   return {
-    brake = braking / weight * BRAKING_SCALE * top_speed ^ 2,
-    friction = (prototype.friction_force or 0) * (vehicle.friction_modifier or 1)
-      * math.max(0, 1 + (tile_friction() - 1) * terrain),
-    rotation = rotation,
-    tank = tank
+    brake = constants.brake * top_speed ^ 2,
+    friction = constants.friction * (vehicle.friction_modifier or 1) * constants.terrain_friction,
+    rotation = rotation, tank = constants.tank, shape = constants
   }
+end
+
+-- A snapshot for ONE synchronous movement-handler invocation. Never retain it
+-- across calls or ticks: another mod can change the live state in the same tick.
+function VehicleSpeed.create_context(vehicle)
+  return {vehicle = vehicle, model = vehicle_model(vehicle)}
+end
+
+local function model_for(vehicle, context)
+  if context and context.vehicle == vehicle then return context.model end
+  return vehicle_model(vehicle)
+end
+
+function VehicleSpeed.body_radius(vehicle)
+  local constants = prototype_data(vehicle.prototype)
+  return constants and constants.body or 0
 end
 
 -- Distance to brake from speed to rest: the integral of v^2 / (P + f v^2).
@@ -158,6 +201,20 @@ local function heading_change(ax, ay, bx, by)
   return math.acos(math.max(-1, math.min(1, (ax * bx + ay * by) / (la * lb))))
 end
 
+-- Scalar equivalent of sampling a known piece: no position/tangent tables or
+-- segment search. Preserve the sampler's fraction and rotation arithmetic.
+local function tangent_at(segment, s)
+  local tangent = segment.tangent
+  if segment.kind == "line" then return tangent.x, tangent.y end
+  local span = segment.end_s - segment.start_s
+  local t = span > 0 and math.max(0, math.min(1, (s - segment.start_s) / span)) or 0
+  local angle = math.abs(segment.sweep) * t
+  local sign = segment.sweep > 0 and 1 or -1
+  local cosine, sine = math.cos(angle), math.sin(angle)
+  return tangent.x * cosine - tangent.y * sine * sign,
+    tangent.y * cosine + tangent.x * sine * sign
+end
+
 -- The reference can spend part of the corridor on a rounded corner. What is
 -- left for correcting the vehicle depends on its distance from the original
 -- path, not its distance from that reference. Locate the corresponding source
@@ -177,7 +234,8 @@ local function path_offset(path, distances, source, position)
     local length_sq = dx * dx + dy * dy
     local t = length_sq > 0 and math.max(0, math.min(1,
       ((position.x - a.x) * dx + (position.y - a.y) * dy) / length_sq)) or 0
-    best = math.min(best, Util.distance_sq(position, {x = a.x + t * dx, y = a.y + t * dy}))
+    local ex, ey = position.x - a.x - t * dx, position.y - a.y - t * dy
+    best = math.min(best, ex * ex + ey * ey)
   end
   return math.sqrt(best)
 end
@@ -186,15 +244,15 @@ end
 -- later corner and stop at the destination. Rebuilt after loading.
 local profiles = setmetatable({}, {__mode = "k"})
 
-local function profile(path, vehicle, clearance)
+local function profile(path, vehicle, clearance, context)
   local cached = profiles[path]
-  local friction_modifier = vehicle.friction_modifier or 1
   local same_shape = cached and cached.vehicle == vehicle.name and cached.clearance == clearance
   -- Fuel and exoskeleton power change braking and a tank's turning rate,
   -- not the route.
-  local model = vehicle_model(vehicle)
+  local model = model_for(vehicle, context)
   if not model then return nil end
-  if same_shape and cached.friction_modifier == friction_modifier and cached.model.rotation == model.rotation
+  same_shape = same_shape and cached.model.shape == model.shape
+  if same_shape and cached.model.friction == model.friction and cached.model.rotation == model.rotation
       and cached.model.brake == model.brake then
     return cached
   end
@@ -204,13 +262,7 @@ local function profile(path, vehicle, clearance)
   else
     -- A rotated rectangle can extend farther sideways than the box supplied to
     -- the pathfinder. Reserve that difference, then some space for tracking.
-    local box, padding = vehicle.prototype.collision_box, 0
-    if box and box.left_top and box.right_bottom then
-      local x = math.max(-box.left_top.x, box.right_bottom.x)
-      local y = math.max(-box.left_top.y, box.right_bottom.y)
-      padding = math.sqrt(x * x + y * y) - math.min(x, y)
-    end
-    available = math.max(0, (clearance or 0) - padding)
+    available = math.max(0, (clearance or 0) - model.shape.padding)
     tracking = math.min(0.4, available * 0.25)
     geometry = Trajectory.build(path, available - tracking)
   end
@@ -222,15 +274,25 @@ local function profile(path, vehicle, clearance)
     local cap = segment.radius and turning_speed(model, segment.radius) or math.huge
     if index < count then
       -- Zero/unknown clearance and exact reversals retain explicit corners.
-      local _, incoming = Trajectory.sample(geometry, segment.end_s - 0.000001)
-      local _, outgoing = Trajectory.sample(geometry, segment.end_s + 0.000001)
-      if heading_change(incoming.x, incoming.y, outgoing.x, outgoing.y) > 0.01 then
+      local next_segment = segments[index + 1]
+      local ix, iy, ox, oy
+      if segment.length > 0.000002 and next_segment.length > 0.000002 then
+        ix, iy = tangent_at(segment, segment.end_s - 0.000001)
+        ox, oy = tangent_at(next_segment, segment.end_s + 0.000001)
+      else
+        -- Tiny numerical joining lines can have arbitrary headings. The old
+        -- epsilon samples cross them; retain that behavior for these rare joins.
+        local _, incoming = Trajectory.sample(geometry, segment.end_s - 0.000001)
+        local _, outgoing = Trajectory.sample(geometry, segment.end_s + 0.000001)
+        ix, iy, ox, oy = incoming.x, incoming.y, outgoing.x, outgoing.y
+      end
+      if heading_change(ix, iy, ox, oy) > 0.01 then
         limits[index + 1] = math.min(limits[index + 1], MIN_CORNER_SPEED)
       end
     end
     limits[index] = math.min(cap, speed_before(model, limits[index + 1], segment.length))
   end
-  cached = {vehicle = vehicle.name, clearance = clearance, friction_modifier = friction_modifier,
+  cached = {vehicle = vehicle.name, clearance = clearance,
     model = model, limits = limits, available = available, tracking_reserve = tracking,
     geometry = geometry, smooth = available > 0,
     corridor = available > 0 and available or MIN_PLANNING_CLEARANCE,
@@ -247,9 +309,9 @@ end
 ---@param clearance? number
 ---@param step number distance travelled before the next update
 ---@return number?
-function VehicleSpeed.control(vehicle, path, index, clearance, step, state)
+function VehicleSpeed.control(vehicle, path, index, clearance, step, state, context)
   if not path or #path == 0 then return nil end
-  local plan = profile(path, vehicle, clearance)
+  local plan = profile(path, vehicle, clearance, context)
   if not plan then return nil end
   index = math.max(1, math.min(index, #path))
   local position, geometry = vehicle.position, plan.geometry
@@ -268,7 +330,11 @@ function VehicleSpeed.control(vehicle, path, index, clearance, step, state)
     local start_s, start_offset, start_index = Trajectory.project(geometry, position, 1)
     if start_offset < offset then s, offset, segment_index = start_s, start_offset, start_index end
   end
-  if state then state.vehicle_trajectory = {path = path, entity = vehicle, s = s, revision = Trajectory.REVISION} end
+  if state then
+    local progress = history or {}
+    progress.path, progress.entity, progress.s, progress.revision = path, vehicle, s, Trajectory.REVISION
+    state.vehicle_trajectory = progress
+  end
   local reached, advances = index, 0
   if plan.smooth and offset <= plan.tracking then
     while reached < #path and advances < 16 and geometry.waypoint_s[reached] <= s do
@@ -314,13 +380,13 @@ function VehicleSpeed.control(vehicle, path, index, clearance, step, state)
       or precise_corner, reached
 end
 
-function VehicleSpeed.limit(vehicle, path, index, clearance, step)
-  return (VehicleSpeed.control(vehicle, path, index, clearance, step))
+function VehicleSpeed.limit(vehicle, path, index, clearance, step, context)
+  return (VehicleSpeed.control(vehicle, path, index, clearance, step, nil, context))
 end
 
 -- The exact reference used for steering and its curvature speed limits.
-function VehicleSpeed.trajectory(vehicle, path, clearance)
-  local plan = profile(path, vehicle, clearance)
+function VehicleSpeed.trajectory(vehicle, path, clearance, context)
+  local plan = profile(path, vehicle, clearance, context)
   return plan and plan.geometry, plan and plan.available, plan and plan.tracking_reserve
 end
 
@@ -329,8 +395,8 @@ end
 ---@param speed_limit? number
 ---@param interval integer ticks between updates
 ---@return boolean
-function VehicleSpeed.braking_overshoots(vehicle, speed_limit, interval)
-  local model = speed_limit and vehicle_model(vehicle)
+function VehicleSpeed.braking_overshoots(vehicle, speed_limit, interval, context)
+  local model = speed_limit and model_for(vehicle, context)
   if not model then return false end
   local speed = math.abs(vehicle.speed or 0)
   if speed <= speed_limit then return false end
@@ -343,8 +409,8 @@ end
 ---@param vehicle LuaEntity
 ---@param speed_limit? number
 ---@return number?
-function VehicleSpeed.maneuver_ticks(vehicle, speed_limit)
-  local model = speed_limit and vehicle_model(vehicle)
+function VehicleSpeed.maneuver_ticks(vehicle, speed_limit, context)
+  local model = speed_limit and model_for(vehicle, context)
   if not model then return nil end
   -- Tanks turn at the same rate at any speed.
   local turn = model.tank and model.rotation or model.rotation * math.sqrt(math.max(speed_limit, MIN_CORNER_SPEED))
@@ -357,9 +423,9 @@ end
 ---@param target MapPosition
 ---@param interval integer ticks between updates
 ---@return boolean
-function VehicleSpeed.steering_overshoots(vehicle, target, interval)
+function VehicleSpeed.steering_overshoots(vehicle, target, interval, context)
   if interval <= 1 then return false end
-  local model = vehicle_model(vehicle)
+  local model = model_for(vehicle, context)
   if not model then return false end
   local speed = math.abs(vehicle.speed or 0)
   -- An upper bound: a tank's rate is exact, a car's grows with speed.

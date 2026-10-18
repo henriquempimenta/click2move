@@ -803,13 +803,13 @@ test("obsolete saved curve anchors are discarded when reference construction cha
   local data = runtime.pd.get_all()[1]
   local expected = {runtime.vehicle_speed.control(vehicle, path, 1, 2, .1, data)}
   local expected_progress = data.vehicle_trajectory.s
-  for _, revision in ipairs({false, 2}) do
+  for _, revision in ipairs({false, 2, 3}) do
     data.vehicle_trajectory = {path = path, entity = vehicle, s = 10000, revision = revision or nil}
     local actual = {runtime.vehicle_speed.control(vehicle, path, 1, 2, .1, data)}
     assert(math.abs(actual[1] - expected[1]) < 1e-10)
     assert(math.abs(actual[2].x - expected[2].x) < 1e-10 and math.abs(actual[2].y - expected[2].y) < 1e-10)
     assert(math.abs(data.vehicle_trajectory.s - expected_progress) < 1e-10)
-    assert(data.vehicle_trajectory.revision == 3)
+    assert(data.vehicle_trajectory.revision == 4)
   end
 end)
 

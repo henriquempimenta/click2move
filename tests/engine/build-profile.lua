@@ -9,6 +9,8 @@ local function point(x, y) return {position = {x = x, y = y}} end
 -- Actual 403-node Factorio 2.1.22 path from the fast-cars walled hairpin,
 -- with a car's requested margin of 2 tiles. Preserve the raw grid nodes so
 -- profiling measures the same collapse/simplification work as the real route.
+-- Captured pathfinder output, including its repeated waypoint. Keep the raw
+-- trace intact so measurements also exercise duplicate-node normalization.
 local hairpin_trace = [[
 -400,-310; -398.5,-310.5; -397.5,-310.5; -396.5,-310.5; -395.5,-310.5; -394.5,-310.5; -393.5,-310.5; -392.5,-310.5
 -391.5,-310.5; -390.5,-310.5; -389.5,-310.5; -388.5,-310.5; -387.5,-310.5; -386.5,-310.5; -385.5,-310.5; -384.5,-310.5

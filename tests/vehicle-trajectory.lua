@@ -664,6 +664,144 @@ local function private(fn, name)
   error("missing test fixture upvalue " .. name)
 end
 
+test("bend scoring measures the surviving arcs after an empty correction disappears", function()
+  local polish = private(Trajectory.build, "polish_bends")
+  local connect, score = private(polish, "arc_line_arc"), private(polish, "bend_score")
+  local pieces = connect(point(0), point(1), point(10 + 16 * math.sin(.5), 16 * (1 - math.cos(.5))),
+    point(math.cos(.5), math.sin(.5)), 1, 1, 1, 16)
+  assert(pieces and #pieces == 2 and pieces[1].kind == "line" and pieces[2].kind == "arc",
+    "fixture must omit the nominal one-tile correction arc")
+  local length, energy, radius = score(pieces)
+  near(length, 18); near(energy, .5 / 16); near(radius, 16)
+  local _, _, narrower = score({{kind = "arc", radius = 2, sweep = .5}})
+  assert(radius > narrower, "the omitted nominal radius undervalued the wider candidate")
+  local _, straight_energy, straight_radius = score({{kind = "line", length = 10}})
+  assert(straight_radius == math.huge and straight_energy == 0)
+end)
+
+test("bend selection prefers the actual surviving radius over a larger nominal proposal", function()
+  local polish = private(Trajectory.build, "polish_bends")
+  local fillet = private(Trajectory.build, "fillet")
+  local append, append_line = private(Trajectory.build, "append"), private(Trajectory.build, "append_line")
+  local make_budget = private(Trajectory.build, "budget")
+  local angle, trim = .5, math.tan(.25)
+  local q = point(10 + 32 * math.sin(angle), 32 * (1 - math.cos(angle)))
+  local points = path({point(0), point(q.x - q.y / math.tan(angle)),
+    point(q.x + 2 * trim * math.cos(angle), q.y + 2 * trim * math.sin(angle))})
+  points[4] = {position = point(points[3].position.x + 2 * trim + 1000, points[3].position.y)}
+  local distances, raw = {}, {}
+  for index, p in ipairs(points) do
+    local before = points[index - 1]
+    local distance = before and math.sqrt((p.position.x - before.position.x) ^ 2
+      + (p.position.y - before.position.y) ^ 2) or 0
+    p.index, p.original_index, p.source = index, index, (distances[index - 1] or 0) + distance
+    distances[index] = p.source
+    raw[index] = p.position
+  end
+  -- A valid starting reference with two tight bends. Refitting its shared
+  -- legs produces candidates whose nominal correction arcs disappear.
+  local a = fillet(points[1], points[2], points[3], 1 - math.cos(.25))
+  local b = fillet(points[2], points[3], points[4], 2 * (1 - math.cos(.25)))
+  near(a.radius, 1); near(b.radius, 2)
+  local plan = {segments = {}, total_length = 0, path_distances = distances, point = points[4].position}
+  append_line(plan, points[1].position, a.a, 0, a.path_start, 1, 2)
+  append(plan, a, a.radius * math.abs(a.sweep))
+  append_line(plan, a.b, b.a, a.path_end, b.path_start, 2, 3)
+  append(plan, b, b.radius * math.abs(b.sweep))
+  append_line(plan, b.b, points[4].position, b.path_end, distances[4], 3, 4)
+  polish(plan, points, 5, make_budget(8192))
+  local tightest = math.huge
+  for index, piece in ipairs(plan.segments) do
+    if piece.radius then tightest = math.min(tightest, piece.radius) end
+    if index > 1 then same(plan.segments[index - 1].b, piece.a) end
+  end
+  assert(tightest > 3.9, "nominal scoring discarded the wider surviving arcs")
+  same(Trajectory.sample(plan, 0), points[1].position)
+  same(Trajectory.sample(plan, plan.total_length), points[4].position)
+  for step = 0, 500 do
+    local s = plan.total_length * step / 500
+    assert(path_distance(Trajectory.sample(plan, s), raw) <= 5 + 1e-8)
+    near(Trajectory.at_source(plan, Trajectory.source_distance(plan, s)), s, 1e-6)
+  end
+end)
+
+test("direct piece positions match route sampling without aliasing its geometry", function()
+  local plan = Trajectory.build(path({point(0), point(30), point(30, 20), point(70, 20)}), 2)
+  for _, segment in ipairs(plan.segments) do
+    for _, t in ipairs({0, .1, .5, .9, 1}) do
+      local direct = Trajectory.segment_position(segment, t)
+      same(direct, Trajectory.sample(plan, segment.start_s + t * segment.length), 1e-7)
+      local original_x = segment.a.x
+      direct.x = direct.x + 100
+      near(segment.a.x, original_x)
+    end
+    same(Trajectory.segment_position(segment, -1), segment.a)
+    same(Trajectory.segment_position(segment, 2), segment.b)
+  end
+end)
+
+test("scalar projection preserves endpoint floors and shallow-arc tracking distances", function()
+  local arc_from = private(private(Trajectory.build, "terminal_curve"), "arc_from")
+  local project = private(Trajectory.project, "project_segment")
+  -- Slow reference: project an angle, then sample the actual point. This
+  -- independently checks the rationalized distance used by the hot path.
+  local function reference(piece, position, floor)
+    local minimum = math.max(0, math.min(1, (floor - piece.start_s) / (piece.end_s - piece.start_s)))
+    local dx, dy = position.x - piece.a.x, position.y - piece.a.y
+    local ux, uy = piece.tangent.x, piece.tangent.y
+    local sign = piece.sweep > 0 and 1 or -1
+    local angle = (math.atan2 or function(y, x) return math.atan(y, x) end)(
+      dx * ux + dy * uy, piece.radius - (-dx * uy + dy * ux) * sign) % (2 * math.pi)
+    local t
+    if angle >= minimum * math.abs(piece.sweep) and angle <= math.abs(piece.sweep) then
+      t = angle / math.abs(piece.sweep)
+    else
+      local first = Trajectory.segment_position(piece, minimum)
+      local a = (position.x - first.x) ^ 2 + (position.y - first.y) ^ 2
+      local b = (position.x - piece.b.x) ^ 2 + (position.y - piece.b.y) ^ 2
+      t = a <= b and minimum or 1
+    end
+    local s = math.min(piece.end_s, math.max(floor, piece.start_s + t * piece.length))
+    local closest = Trajectory.segment_position(piece, (s - piece.start_s) / (piece.end_s - piece.start_s))
+    return s, math.sqrt((position.x - closest.x) ^ 2 + (position.y - closest.y) ^ 2)
+  end
+  for _, radius in ipairs({.001, 3, 1e6, 1e12, 1e20}) do
+    for _, sign in ipairs({-1, 1}) do
+      for _, origin in ipairs({0, 1000000.25}) do
+        local piece = arc_from(point(origin, -origin), point(.6, .8), radius,
+          sign * math.min(.8, 100 / radius))
+        piece.length = radius * math.abs(piece.sweep)
+        piece.start_s, piece.end_s = 11, 11 + piece.length
+        for _, t in ipairs({-.2, 0, .1, .5, .99, 1, 1.2}) do
+          local angle = math.abs(piece.sweep) * t
+          local along, across = radius * math.sin(angle), radius * 2 * math.sin(angle / 2) ^ 2 * sign
+          for _, offset in ipairs({-.001, 0, .001, 3}) do
+            local position = point(piece.a.x + .6 * along - .8 * across - .8 * offset,
+              piece.a.y + .8 * along + .6 * across + .6 * offset)
+            for _, minimum in ipairs({0, .4, .9}) do
+              local floor = piece.start_s + minimum * piece.length
+              local expected_s, expected_distance = reference(piece, position, floor)
+              local s, distance = project(piece, position, floor)
+              near(s, expected_s, 1e-7); near(distance, expected_distance, 1e-7)
+              assert(s >= floor - 1e-8)
+            end
+          end
+        end
+      end
+    end
+  end
+  local piece = arc_from(point(0), point(1), 10, 1)
+  piece.length, piece.start_s, piece.end_s = 10, 0, 10
+  local position = point(4, 2)
+  for _ = 1, 100 do project(piece, position) end
+  collectgarbage("collect"); collectgarbage("stop")
+  local before = collectgarbage("count")
+  for _ = 1, 2000 do project(piece, position) end
+  local growth = collectgarbage("count") - before
+  collectgarbage("restart")
+  assert(growth < 16, "projection allocated temporary positions or tangents: " .. growth .. " KiB")
+end)
+
 test("clearance certificates pair both chord endpoints with the same finite leg", function()
   local certify = private(private(Trajectory.build, "certify"), "certify_pieces")
   local make_budget = private(Trajectory.build, "budget")

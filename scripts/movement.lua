@@ -275,14 +275,14 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
   local was_pending = data.waypoint_scan_pending
   -- A waypoint under the vehicle's own body is reached: a car cannot drive
   -- onto a point beside it any closer than its turning circle allows.
-  local box = vehicle.prototype and vehicle.prototype.collision_box
-  local body = box and math.max(-box.left_top.x, -box.left_top.y, box.right_bottom.x, box.right_bottom.y) or 0
+  local body = VehicleSpeed.body_radius(vehicle)
   local advanced, pending = Navigation.advance_waypoints(data, vehicle, goal.path, dynamic_threshold_sq, game.tick,
     goal.path_clearance, body)
   if was_pending ~= data.waypoint_scan_pending then PlayerData.notify_changed() end
   if pending then PlayerData.stop_input(vehicle, data); return false end
+  local speed_context = VehicleSpeed.create_context(vehicle)
   local speed_limit, curve_target, on_curve, reached = VehicleSpeed.control(vehicle, goal.path,
-    data.current_waypoint, goal.path_clearance, speed * config.update_interval, data)
+    data.current_waypoint, goal.path_clearance, speed * config.update_interval, data, speed_context)
   if reached and reached > data.current_waypoint then
     advanced = advanced + reached - data.current_waypoint
     data.current_waypoint = reached
@@ -325,9 +325,11 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
       or Util.distance_sq(vehicle.position, data.vehicle_last_position) > 0.0001 then
     data.vehicle_moved_tick = game.tick
   end
-  data.vehicle_last_position = {x = vehicle.position.x, y = vehicle.position.y}
+  local last_position = data.vehicle_last_position or {}
+  last_position.x, last_position.y = vehicle.position.x, vehicle.position.y
+  data.vehicle_last_position = last_position
   local maneuvering = game.tick - data.vehicle_moved_tick <= config.stuck_threshold
-  local maneuver_ticks = maneuvering and VehicleSpeed.maneuver_ticks(vehicle, speed_limit) or nil
+  local maneuver_ticks = maneuvering and VehicleSpeed.maneuver_ticks(vehicle, speed_limit, speed_context) or nil
   local target_for_stuck_check = target_pos
   if Movement.check_progress_and_stuck(data, vehicle.position, target_for_stuck_check, player_index, maneuver_ticks) then
 
@@ -355,19 +357,21 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
   -- could have done that much. A longer overshoot is handled by controlling
   -- every tick instead.
   Navigation.set_vehicle_riding(vehicle, target_pos, speed_limit,
-    VehicleSpeed.braking_overshoots(vehicle, speed_limit, 1), curve_target ~= nil)
+    VehicleSpeed.braking_overshoots(vehicle, speed_limit, 1, speed_context), curve_target ~= nil)
   local riding = vehicle.riding_state
   local accelerating = riding.acceleration == defines.riding.acceleration.accelerating
     or riding.acceleration == defines.riding.acceleration.reversing
-  data.vehicle_speed_sample = {tick = game.tick, speed = speed, accelerating = accelerating}
+  local speed_sample = data.vehicle_speed_sample or {}
+  speed_sample.tick, speed_sample.speed, speed_sample.accelerating = game.tick, speed, accelerating
+  data.vehicle_speed_sample = speed_sample
   -- Control every tick while one update could carry the vehicle past the
   -- heading it needs, or past its speed limit while accelerating or braking.
   local overshooting = on_curve or (riding.direction ~= defines.riding.direction.straight
-      and VehicleSpeed.steering_overshoots(vehicle, target_pos, config.update_interval))
+      and VehicleSpeed.steering_overshoots(vehicle, target_pos, config.update_interval, speed_context))
     or (accelerating and speed_limit ~= nil and speed_limit - speed
       < (data.vehicle_acceleration or DEFAULT_VEHICLE_ACCELERATION) * (config.update_interval + 1))
     or (riding.acceleration == defines.riding.acceleration.braking
-      and VehicleSpeed.braking_overshoots(vehicle, speed_limit, config.update_interval + 1))
+      and VehicleSpeed.braking_overshoots(vehicle, speed_limit, config.update_interval + 1, speed_context))
   if update_corner_approach(data, vehicle, goal.path, speed * config.update_interval, overshooting) then
     PlayerData.notify_changed()
   end

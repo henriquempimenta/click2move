@@ -9,7 +9,7 @@
 local Trajectory = {}
 -- Saved arc-length anchors belong to a particular reference construction.
 -- Bump when that construction changes, so old anchors are projected afresh.
-Trajectory.REVISION = 3
+Trajectory.REVISION = 4
 
 local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
 local TAU = 2 * math.pi
@@ -62,11 +62,11 @@ local function distance(a, b)
 end
 local function clamp(value, low, high) return math.max(low, math.min(high, value)) end
 
-local function segment_distance_sq(p, a, b)
+local function segment_distance_sq(px, py, a, b)
   local dx, dy = b.x - a.x, b.y - a.y
   local length = dx * dx + dy * dy
-  local t = length > 0 and clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / length, 0, 1) or 0
-  return (p.x - a.x - t * dx) ^ 2 + (p.y - a.y - t * dy) ^ 2
+  local t = length > 0 and clamp(((px - a.x) * dx + (py - a.y) * dy) / length, 0, 1) or 0
+  return (px - a.x - t * dx) ^ 2 + (py - a.y - t * dy) ^ 2
 end
 
 local function segment_at(plan, s)
@@ -188,7 +188,8 @@ local function simplify(points, clearance, protected, work)
         local a, b = points[from].position, points[to].position
         local maximum, split, forced = 0, nil, nil
         for index = from + 1, to - 1 do
-          local error = segment_distance_sq(points[index].position, a, b)
+          local point = points[index].position
+          local error = segment_distance_sq(point.x, point.y, a, b)
           if error > maximum then maximum, split = error, index end
           if protected[index] then forced = index; break end
         end
@@ -210,8 +211,8 @@ local function simplify(points, clearance, protected, work)
   return result
 end
 
-local function arc_position(segment, t)
-  if t == 0 then return copy(segment.a) elseif t == 1 then return copy(segment.b) end
+local function arc_coordinates(segment, t)
+  if t == 0 then return segment.a.x, segment.a.y elseif t == 1 then return segment.b.x, segment.b.y end
   local angle = math.abs(segment.sweep) * t
   local sign = segment.sweep > 0 and 1 or -1
   -- Local tangent coordinates avoid subtracting two huge circle coordinates
@@ -219,8 +220,13 @@ local function arc_position(segment, t)
   local along = segment.radius * math.sin(angle)
   local across = segment.radius * 2 * math.sin(angle / 2) ^ 2 * sign
   local ux, uy = segment.tangent.x, segment.tangent.y
-  return {x = segment.a.x + ux * along - uy * across,
-    y = segment.a.y + uy * along + ux * across}
+  return segment.a.x + ux * along - uy * across,
+    segment.a.y + uy * along + ux * across
+end
+
+local function arc_position(segment, t)
+  local x, y = arc_coordinates(segment, t)
+  return {x = x, y = y}
 end
 
 local function fillet(before, vertex, after, clearance)
@@ -426,9 +432,14 @@ local function piece_length(piece)
   return piece.kind == "line" and piece.length or piece.radius * math.abs(piece.sweep)
 end
 
+local function piece_coordinates(piece, t)
+  if piece.kind == "arc" then return arc_coordinates(piece, t) end
+  return piece.a.x + (piece.b.x - piece.a.x) * t, piece.a.y + (piece.b.y - piece.a.y) * t
+end
+
 local function piece_point(piece, t)
-  if piece.kind == "arc" then return arc_position(piece, t) end
-  return {x = piece.a.x + (piece.b.x - piece.a.x) * t, y = piece.a.y + (piece.b.y - piece.a.y) * t}
+  local x, y = piece_coordinates(piece, t)
+  return {x = x, y = y}
 end
 
 -- Proves every point of the pieces lies within the clearance of the original
@@ -441,9 +452,10 @@ certify_pieces = function(pieces, original, first, last, clearance, work)
   local function sample(piece, t)
     -- Trigonometry, temporary vectors and distance checks all count.
     if not spend(work, edges + 4) then return nil end
-    local point, values, nearest = piece_point(piece, t), {}, math.huge
+    local x, y = piece_coordinates(piece, t)
+    local values, nearest = {}, math.huge
     for edge = first, last - 1 do
-      local d = segment_distance_sq(point, original[edge].position, original[edge + 1].position)
+      local d = segment_distance_sq(x, y, original[edge].position, original[edge + 1].position)
       values[edge - first + 1], nearest = d, math.min(nearest, d)
     end
     values.nearest = math.sqrt(nearest)
@@ -459,15 +471,16 @@ certify_pieces = function(pieces, original, first, last, clearance, work)
     local allowance = clearance - roundoff
     local a, b = sample(piece, 0), sample(piece, 1)
     if not a or not b or a.nearest > allowance or b.nearest > allowance then return false end
-    local stack = {{0, 1, a, b}}
-    while #stack > 0 do
+    local stack, top = {0, 1, a, b}, 4
+    while top > 0 do
       if not spend(work, edges + 2) then return false end
-      local span = table.remove(stack)
-      local low, high, d0, d1 = span[1], span[2], span[3], span[4]
+      local low, high, d0, d1 = stack[top - 3], stack[top - 2], stack[top - 1], stack[top]
+      stack[top - 3], stack[top - 2], stack[top - 1], stack[top] = nil, nil, nil, nil
+      top = top - 4
       local h = (high - low) * length
       local bound = (d0.nearest + d1.nearest + h) / 2
       local angle = piece.radius and math.abs(piece.sweep) * (high - low) or 0
-      if angle <= math.pi then
+      if bound > allowance and angle <= math.pi then
         -- A finite segment's radius-r tube is convex. A chord whose BOTH
         -- endpoints lie in the SAME tube stays in it; a circular subarc
         -- lies within its sagitta of that chord. Pair edges before taking min.
@@ -482,7 +495,9 @@ certify_pieces = function(pieces, original, first, last, clearance, work)
         local middle = (low + high) / 2
         local d = sample(piece, middle)
         if not d or d.nearest > allowance then return false end
-        stack[#stack + 1], stack[#stack + 2] = {low, middle, d0, d}, {middle, high, d, d1}
+        stack[top + 1], stack[top + 2], stack[top + 3], stack[top + 4] = low, middle, d0, d
+        stack[top + 5], stack[top + 6], stack[top + 7], stack[top + 8] = middle, high, d, d1
+        top = top + 8
       end
     end
   end
@@ -653,7 +668,7 @@ local function bridge(points, corners, covered, first, last, clearance, original
       if length > 0 then
         local t = clamp(((piece.b.x - a.position.x) * (b.position.x - a.position.x)
           + (piece.b.y - a.position.y) * (b.position.y - a.position.y)) / (length * length), 0, 1)
-        local d = segment_distance_sq(piece.b, a.position, b.position)
+        local d = segment_distance_sq(piece.b.x, piece.b.y, a.position, b.position)
         if d < nearest then nearest, nearest_source = d, a.source + t * (b.source - a.source) end
       end
     end
@@ -757,6 +772,19 @@ end
 -- squared curvature, with a small length bound. Constant-radius arc/line/arc
 -- candidates keep tangent joins and are accepted only with a certificate
 -- against the ORIGINAL corridor. Search and certification work are bounded.
+local function bend_score(pieces)
+  local length, energy, radius = 0, 0, math.huge
+  for _, piece in ipairs(pieces) do
+    local l = piece_length(piece)
+    length = length + l
+    if piece.radius then
+      radius = math.min(radius, piece.radius)
+      energy = energy + l / (piece.radius * piece.radius)
+    end
+  end
+  return length, energy, radius
+end
+
 local function polish_bends(plan, original, clearance, work)
   local tried = {}
   local function end_tangent(piece)
@@ -785,11 +813,12 @@ local function polish_bends(plan, original, clearance, work)
       for _, shift in ipairs({math.floor(width / 2), width - 1, 0}) do
         local first = math.max(1, math.min(bottleneck - shift, #segments - width + 1))
         local last = math.min(#segments, first + width - 1)
-        local key = first .. ":" .. last
+        local key = first * (#segments + 1) + last
         if not seen[key] and first <= bottleneck and last >= bottleneck and active(work) then
           if not spend(work, 32 + width * 2) then break end
           seen[key] = true
           local a, b = segments[first], segments[last]
+          local exit_tangent = end_tangent(b)
           local source_start, source_end = a.path_start, b.path_end
           local original_first, original_last = source_edge(source_start), source_edge(source_end) + 1
           local energy, continuous = 0, true
@@ -798,7 +827,7 @@ local function polish_bends(plan, original, clearance, work)
             continuous = incoming.x * a.tangent.x + incoming.y * a.tangent.y > 1 - 1e-8
           end
           if last < #segments then
-            local outgoing, incoming = segments[last + 1].tangent, end_tangent(b)
+            local outgoing, incoming = segments[last + 1].tangent, exit_tangent
             continuous = continuous and incoming.x * outgoing.x + incoming.y * outgoing.y > 1 - 1e-8
           end
           for index = first, last do
@@ -813,29 +842,27 @@ local function polish_bends(plan, original, clearance, work)
             local length = b.end_s - a.start_s
             for _, gain in ipairs({2, 1.5, 1.2, 4, 8}) do
               local radius = tightest * gain
-              if not best or radius >= best.radius then
+              -- A numerically empty small arc may be omitted, leaving only
+              -- the 16x circle. Its nominal radius cannot rule it out.
+              if not best or radius * 16 >= best.radius then
                 -- A tiny entry correction must not inherit the main bend's
                 -- tight radius hundreds of tiles before it. Unequal circles
                 -- can spread that correction with much gentler curvature.
                 for _, radii in ipairs({{1, 1}, {16, 1}, {1, 16}}) do
                   for _, turns in ipairs({{1, 1}, {-1, -1}, {1, -1}, {-1, 1}}) do
                     if not construct(work, 8) then break end
-                    local pieces = arc_line_arc(a.a, a.tangent, b.b, end_tangent(b), radius * radii[1], turns[1], turns[2], radius * radii[2])
+                    local pieces = arc_line_arc(a.a, a.tangent, b.b, exit_tangent, radius * radii[1], turns[1], turns[2], radius * radii[2])
                     if pieces then
-                      local candidate_length, candidate_energy = 0, 0
-                      for _, piece in ipairs(pieces) do
-                        local l = piece_length(piece)
-                        candidate_length = candidate_length + l
-                        if piece.radius then candidate_energy = candidate_energy + l / (piece.radius * piece.radius) end
-                      end
+                      local candidate_length, candidate_energy, candidate_radius = bend_score(pieces)
                       if candidate_length <= length * 1.05 and candidate_energy < energy * .99
-                          and (not best or radius > best.radius or candidate_energy < best.energy)
+                          and (not best or candidate_radius > best.radius
+                            or (candidate_radius == best.radius and candidate_energy < best.energy))
                           and distance(pieces[1].a, a.a) <= 1e-7 then
                         local check = budget(math.min(work.remaining, 768), work)
                         local safe = certify_pieces(pieces, original, original_first, original_last, clearance, check)
                         if safe then safe = spend(work, math.ceil(#segments / 4) + #pieces * (original_last - original_first + 4)) end
                         if safe then
-                          best = {pieces = pieces, radius = radius, energy = candidate_energy, first = first, last = last,
+                          best = {pieces = pieces, radius = candidate_radius, energy = candidate_energy, first = first, last = last,
                             original_first = original_first, original_last = original_last}
                           break
                         end
@@ -860,7 +887,7 @@ local function polish_bends(plan, original, clearance, work)
           local a, b = original[edge], original[edge + 1]
           local dx, dy = b.position.x - a.position.x, b.position.y - a.position.y
           local fraction = clamp(((piece.b.x - a.position.x) * dx + (piece.b.y - a.position.y) * dy) / (dx * dx + dy * dy), 0, 1)
-          local d = segment_distance_sq(piece.b, a.position, b.position)
+          local d = segment_distance_sq(piece.b.x, piece.b.y, a.position, b.position)
           if d < nearest then nearest, mapped = d, a.source + fraction * (b.source - a.source) end
         end
         raw_source = clamp(mapped, raw_source, source_end)
@@ -1135,8 +1162,14 @@ function Trajectory.sample(plan, s)
   return position, tangent, curvature, index
 end
 
+-- Position only on an already known piece, for diagnostics. Keep the same
+-- stable local arc coordinates as steering without a search or tangent copy.
+function Trajectory.segment_position(segment, t)
+  return piece_point(segment, clamp(t, 0, 1))
+end
+
 local function project_segment(segment, position, minimum_s)
-  local t
+  local t, radial
   local minimum = fraction(minimum_s or segment.start_s, segment.start_s, segment.end_s)
   if segment.kind == "line" then
     local dx, dy = segment.b.x - segment.a.x, segment.b.y - segment.a.y
@@ -1151,15 +1184,23 @@ local function project_segment(segment, position, minimum_s)
     local sweep = math.abs(segment.sweep)
     if angle >= minimum * sweep and angle <= sweep then
       t = angle / sweep
+      -- Rationalize |hypot(along, radius-across)-radius|. Subtracting
+      -- two huge radii loses small tracking offsets on shallow arcs.
+      local along_ratio, across_ratio = along / segment.radius, across / segment.radius
+      radial = math.abs((along_ratio * along + (across_ratio - 2) * across)
+        / (math.sqrt(along_ratio * along_ratio + (1 - across_ratio) ^ 2) + 1))
     else
-      local first = sample_segment(segment, segment.start_s + minimum * segment.length)
-      t = distance(position, first) <= distance(position, segment.b) and minimum or 1
+      local x, y = arc_coordinates(segment, minimum)
+      local first_distance = math.sqrt((position.x - x) ^ 2 + (position.y - y) ^ 2)
+      t = first_distance <= distance(position, segment.b) and minimum or 1
     end
   end
   local s = math.max(minimum_s or 0, segment.start_s + t * segment.length)
   s = clamp(s, segment.start_s, segment.end_s)
-  local nearest = sample_segment(segment, s)
-  return s, distance(position, nearest)
+  t = fraction(s, segment.start_s, segment.end_s)
+  if radial and t > 0 and t < 1 then return s, radial end
+  local x, y = piece_coordinates(segment, t)
+  return s, math.sqrt((position.x - x) ^ 2 + (position.y - y) ^ 2)
 end
 
 -- Local projection, never an all-path scan. The caller supplies its current

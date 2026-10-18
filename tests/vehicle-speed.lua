@@ -157,6 +157,178 @@ local function fuel(entity, burning, waiting, remaining)
   entity.get_fuel_inventory = function() return inventory end
 end
 
+test("one handler snapshot shares live fuel reads and preserves helper results", function()
+  local state, runtime = fixture(TANK, 10, .2)
+  fuel(state.entity, {NUCLEAR, 5}, {{NUCLEAR, 5}})
+  local inventory = state.entity.get_fuel_inventory
+  local reads = 0
+  state.entity.get_fuel_inventory = function() reads = reads + 1; return inventory() end
+  local path = {}
+  for _, p in ipairs(line(100)) do path[#path + 1] = {position = p} end
+  local speed = runtime.vehicle_speed
+  local target = point(50, -30)
+  local function results(context)
+    local limit = speed.limit(state.entity, path, 2, 2, 2, context)
+    return {limit, speed.maneuver_ticks(state.entity, limit, context),
+      speed.braking_overshoots(state.entity, limit, 1, context),
+      speed.steering_overshoots(state.entity, target, 10, context),
+      speed.braking_overshoots(state.entity, limit, 11, context)}
+  end
+  local separate = results()
+  equal(reads, 5, "the compatibility calls must still read live state separately")
+  reads = 0
+  local context = speed.create_context(state.entity)
+  local shared = results(context)
+  equal(reads, 1, "one handler must scan the live fuel inventory only once")
+  for index, expected in ipairs(separate) do equal(shared[index], expected, "sharing changed helper " .. index) end
+  -- A snapshot belonging to another vehicle cannot bypass live reads.
+  reads = 0
+  local other = {}; for key, value in pairs(state.entity) do other[key] = value end
+  speed.maneuver_ticks(other, .1, context)
+  equal(reads, 1, "a foreign vehicle context was accepted")
+end)
+
+test("fresh contexts see same-tick fuel power and friction changes", function()
+  local state, runtime = fixture(TANK, 10, .2)
+  local speed = runtime.vehicle_speed
+  fuel(state.entity, {NUCLEAR, 5}, {{NUCLEAR, 5}})
+  state.entity.grid = {movement_bonus = 3}
+  local path = {}
+  for _, p in ipairs(line(300)) do path[#path + 1] = {position = p} end
+  local powered = speed.create_context(state.entity)
+  local strong = speed.limit(state.entity, path, 2, 2, 0, powered)
+  local turn = speed.maneuver_ticks(state.entity, .1, powered)
+  -- No tick advance: another handler can see a changed inventory or power.
+  state.entity.grid.movement_bonus = 0
+  state.entity.friction_modifier = 0
+  fuel(state.entity, {NUCLEAR, 5}, {}, 0)
+  local depleted = speed.create_context(state.entity)
+  local weak = speed.limit(state.entity, path, 2, 2, 0, depleted)
+  assert(weak < strong, "the fresh context retained old fuel or friction")
+  assert(speed.maneuver_ticks(state.entity, .1, depleted) > turn * 2, "the fresh context retained old equipment power")
+  equal(weak, speed.limit(state.entity, path, 2, 2, 0), "unshared compatibility call used a stale model")
+  -- Rebuilding a profile must not mutate an earlier context's model.
+  equal(speed.maneuver_ticks(state.entity, .1, powered), turn)
+  equal(state.tick, 0, "the invalidation check accidentally advanced game time")
+end)
+
+test("prototype constants are reused while prototype replacement rebuilds geometry", function()
+  local state, runtime = fixture(TANK, 1)
+  local reads = {}
+  state.entity.prototype = setmetatable({}, {__index = function(_, key)
+    reads[key] = (reads[key] or 0) + 1; return TANK[key]
+  end})
+  local speed = runtime.vehicle_speed
+  local first = speed.create_context(state.entity)
+  speed.body_radius(state.entity)
+  speed.create_context(state.entity)
+  for _, key in ipairs({"braking_force", "weight", "rotation_speed", "friction_force", "collision_box"}) do
+    equal(reads[key], 1, "immutable prototype field " .. key .. " was reread")
+  end
+  local path = {{position = point(0)}, {position = point(100)}}
+  local original, original_room = speed.trajectory(state.entity, path, 2, first)
+  local replacement = {}; for key, value in pairs(TANK) do replacement[key] = value end
+  replacement.collision_box = {left_top = point(-5, -5), right_bottom = point(5, 5)}
+  state.entity.prototype = replacement
+  local changed, changed_room = speed.trajectory(state.entity, path, 2, speed.create_context(state.entity))
+  assert(changed ~= original and changed_room < original_room,
+    "a different prototype reused the old shape or collision allowance")
+end)
+
+test("recreated native-style prototype wrappers retain the cached shape", function()
+  local state, runtime = fixture(CAR, 1)
+  local wrappers = 0
+  state.entity.prototype = nil
+  setmetatable(state.entity, {__index = function(_, key)
+    if key == "prototype" then
+      wrappers = wrappers + 1
+      return setmetatable({name = "wrapped-car"}, {__index = CAR})
+    end
+  end})
+  local path = {{position = point(0)}, {position = point(100)}}
+  local speed = runtime.vehicle_speed
+  local first = speed.create_context(state.entity)
+  local original = speed.trajectory(state.entity, path, 2, first)
+  collectgarbage("collect")
+  local second = speed.create_context(state.entity)
+  local repeated = speed.trajectory(state.entity, path, 2, second)
+  assert(wrappers >= 2, "the fixture did not recreate the native-style wrapper")
+  equal(second.model.shape, first.model.shape, "wrapper recreation lost immutable prototype constants")
+  equal(repeated, original, "wrapper recreation rebuilt identical path geometry")
+end)
+
+test("the movement handler scans fuel once and reuses state after observing acceleration", function()
+  local state, runtime = fixture(TANK, 1, .2)
+  fuel(state.entity, {NUCLEAR, 5}, {{NUCLEAR, 5}})
+  local inventory = state.entity.get_fuel_inventory
+  local reads = 0
+  state.entity.get_fuel_inventory = function() reads = reads + 1; return inventory() end
+  local data = runtime.route(line(300))
+  reads = 0
+  runtime.advance(1)
+  equal(reads, 1, "production movement rescanned the fuel inventory")
+  local progress, position, sample = data.vehicle_trajectory, data.vehicle_last_position, data.vehicle_speed_sample
+  local old_s, old_x, old_tick = progress.s, position.x, sample.tick
+  -- The next sample represents native acceleration from the previous command.
+  state.entity.position, state.entity.speed = point(.25), .3
+  reads = 0
+  runtime.advance(1)
+  equal(reads, 1, "the next handler did not take exactly one fresh snapshot")
+  equal(data.vehicle_trajectory, progress, "curve progress table was reallocated")
+  equal(data.vehicle_last_position, position, "last-position table was reallocated")
+  equal(data.vehicle_speed_sample, sample, "speed-sample table was reallocated")
+  assert(progress.s > old_s and position.x > old_x and sample.tick > old_tick, "reused state was not updated")
+  assert(data.vehicle_acceleration and data.vehicle_acceleration > .09,
+    "the speed sample was overwritten before acceleration was observed")
+end)
+
+test("backwards planning computes ordinary boundary tangents without sampling positions", function()
+  local trajectory = dofile("scripts/vehicle-trajectory.lua")
+  local sample, samples = trajectory.sample, 0
+  trajectory.sample = function(...) samples = samples + 1; return sample(...) end
+  local env = setmetatable({prototypes = {tile = TILES}, require = function(name)
+    return name == "scripts/vehicle-trajectory" and trajectory or require(name)
+  end}, {__index = _G})
+  local speed = assert(loadfile("scripts/vehicle-speed.lua", "t", env))()
+  local state = fixture(CAR, 1)
+  local path = {{position = point(0)}, {position = point(10)}, {position = point(10, 30)}}
+  local geometry = speed.trajectory(state.entity, path, 0)
+  assert(#geometry.segments > 1, "fixture did not contain an explicit corner")
+  equal(samples, 0, "backwards planning sampled at every segment boundary")
+  state.entity.position = point(9.8)
+  equal(speed.limit(state.entity, path, 2, 0, 0), .03, "the explicit sharp corner lost its speed cap")
+  samples = 0
+  geometry = speed.trajectory(state.entity, path, 2)
+  assert(#geometry.segments > 2, "fixture did not contain smooth joins")
+  equal(samples, 0, "arc exit tangents were found through curve sampling")
+end)
+
+test("a microscopic joining line cannot create an artificial speed bump", function()
+  local trajectory = dofile("scripts/vehicle-trajectory.lua")
+  local tiny = 1e-8
+  -- A numerical joining sliver between two otherwise straight pieces has an
+  -- arbitrary vertical heading, despite requiring no meaningful car turn.
+  local geometry = {total_length = 40 + tiny, path_distances = {0, 40}, point = point(40, tiny),
+    waypoint_s = {0, 40 + tiny}, waypoint_segments = {1, 3}, segments = {
+      {kind = "line", a = point(0), b = point(10), tangent = point(1), length = 10,
+        start_s = 0, end_s = 10, path_start = 0, path_end = 10},
+      {kind = "line", a = point(10), b = point(10, tiny), tangent = point(0, 1), length = tiny,
+        start_s = 10, end_s = 10 + tiny, path_start = 10, path_end = 10},
+      {kind = "line", a = point(10, tiny), b = point(40, tiny), tangent = point(1), length = 30,
+        start_s = 10 + tiny, end_s = 40 + tiny, path_start = 10, path_end = 40}
+    }}
+  trajectory.build = function() return geometry end
+  local env = setmetatable({prototypes = {tile = TILES}, require = function(name)
+    return name == "scripts/vehicle-trajectory" and trajectory or require(name)
+  end}, {__index = _G})
+  local speed = assert(loadfile("scripts/vehicle-speed.lua", "t", env))()
+  local state = fixture(CAR, 1)
+  state.entity.position = point(9.8)
+  local path = {{position = point(0)}, {position = point(40)}}
+  assert(speed.limit(state.entity, path, 2, 2, 0) > .1,
+    "an insignificant joining line imposed a crawl on a straight route")
+end)
+
 test("tank corner speed follows the fuel and exoskeleton turning rate, and falls when power does", function()
   local state, runtime = fixture(TANK, 1)
   local path = {}

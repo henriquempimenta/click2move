@@ -63,9 +63,9 @@ function DebugRendering.draw(player, data, goal, points, surface, objects)
           local angle = math.min(.1, 4 * math.asin(math.sqrt(math.min(1, .02 / (2 * segment.radius)))))
           steps = math.max(1, math.ceil(math.abs(segment.sweep) / angle))
         end
-        local previous = Trajectory.sample(geometry, segment.start_s)
+        local previous = Trajectory.segment_position(segment, 0)
         for step = 1, steps do
-          local point = Trajectory.sample(geometry, segment.start_s + segment.length * step / steps)
+          local point = Trajectory.segment_position(segment, step / steps)
           draw("draw_line", {color = MAGENTA, width = 3, from = previous, to = point}, mode)
           previous = point
           if count >= MAX_OBJECTS then limited = true; break end

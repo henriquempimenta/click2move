@@ -131,14 +131,14 @@ local function valid_motion(history, entity, path, waypoint, position, tick, sur
   return distance_sq <= allowance * allowance
 end
 
-local function segment_distance_sq(position, from, to)
+local function segment_distance_sq(px, py, from, to)
   local dx, dy = to.x - from.x, to.y - from.y
   local length_sq = dx * dx + dy * dy
   local t = 0
   if length_sq > 0 then
-    t = math.max(0, math.min(1, ((position.x - from.x) * dx + (position.y - from.y) * dy) / length_sq))
+    t = math.max(0, math.min(1, ((px - from.x) * dx + (py - from.y) * dy) / length_sq))
   end
-  return Util.distance_sq(position, {x = from.x + t * dx, y = from.y + t * dy})
+  return (px - (from.x + t * dx)) ^ 2 + (py - (from.y + t * dy)) ^ 2
 end
 
 -- A shortcut to path[target] is safe while it stays within the path margin of
@@ -157,10 +157,10 @@ local function shortcut_clear(path, from, target, position, margin, budget)
   local limit_sq = (margin * 3 / 4) ^ 2
   for sample = 0, samples do
     local t = samples > 0 and sample / samples or 0
-    local point = {x = position.x + dx * t, y = position.y + dy * t}
+    local px, py = position.x + dx * t, position.y + dy * t
     local clear = false
     for index = from, target - 1 do
-      if segment_distance_sq(point, path[index].position, path[index + 1].position) <= limit_sq then
+      if segment_distance_sq(px, py, path[index].position, path[index + 1].position) <= limit_sq then
         clear = true; break
       end
     end
@@ -198,7 +198,7 @@ local function advance_nearby(path, index, position, step_from, threshold_sq, cl
     local waypoint = path[index].position
     local distance_sq = Util.distance_sq(position, waypoint)
     if distance_sq >= threshold_sq or not (distance_sq <= reach * reach or passed_waypoint(path, index, position)
-        or (step_from and segment_distance_sq(waypoint, step_from, position) <= reach * reach)
+        or (step_from and segment_distance_sq(waypoint.x, waypoint.y, step_from, position) <= reach * reach)
         or (clearance and clearance > 0 and shortcut_clear(path, from, index + 1, position, clearance, budget))) then
       break
     end
