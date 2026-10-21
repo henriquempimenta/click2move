@@ -12,6 +12,7 @@
   "scripts/player-data.lua",
   "scripts/rendering.lua",
   "scripts/debug-rendering.lua",
+  "scripts/bezier-preview.lua",
   "scripts/util.lua",
   "scripts/vehicle-braking.lua",
   "scripts/vehicle-speed.lua",

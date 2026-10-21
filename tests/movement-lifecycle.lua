@@ -699,8 +699,34 @@ test("car preview draws recorded and usable margins and the exact curve without 
   local before = #state.objects
   runtime.pathfinding.request_paths_for_player(1, true)
   assert(#state.objects == before, "unchanged refresh rebuilt persistent overlay")
+  setting(runtime, state, "c2m-debug-curve", false)
+  setting(runtime, state, "c2m-debug-bezier", true)
+  local green = 0
+  local bezier_objects = data.goals[1].rendering.path_objects
+  for _, object in ipairs(bezier_objects) do
+    local spec = object.spec
+    assert(spec.players[1] == state.player and spec.surface == state.surface)
+    if spec.from and spec.color.g == 1 and spec.color.b == .25 then green = green+1 end
+  end
+  assert(green > 2, "standalone Bezier toggle did not draw the experimental curve")
+  assert(not data.vehicle_trajectory and data.current_waypoint == 1, "Bezier preview changed driving progress")
+  setting(runtime, state, "c2m-debug-bezier", false)
+  for _, object in ipairs(bezier_objects) do assert(not object.valid, "Bezier toggle leaked rendering") end
   runtime.events["c2m-cancel-command"]({player_index = 1, input_name = "c2m-cancel-command"})
   for _, object in ipairs(refreshed) do assert(not object.valid, "cancel leaked overlay") end
+  setting(runtime, state, "c2m-debug-preview", false)
+  setting(runtime, state, "c2m-debug-bezier", true)
+  runtime.command(50, 50)
+  runtime.path(state.next_path, {{position = {x = 0, y = 0}}, {position = {x = 50, y = 0}}, {position = {x = 50, y = 50}}})
+  local moving = runtime.pd.get_all()[1]
+  assert(not moving.preview and not moving.goals[1].vehicle_reference,
+    "normal debug drawing committed a driving reference")
+  for _ = 1, 10 do runtime.tick() end
+  local committed = moving.goals[1].vehicle_reference
+  assert(committed, "controller did not commit its reference")
+  assert(moving.goals[1].rendering.curve_reference == committed.geometry, "overlay retained a pre-control curve")
+  setting(runtime, state, "c2m-debug-bezier", false)
+  assert(moving.goals[1].vehicle_reference == committed, "debug toggle changed the committed route")
 end)
 
 test("preview never adopts or cancels a foreign spider command matching its goal", function()
@@ -803,13 +829,13 @@ test("obsolete saved curve anchors are discarded when reference construction cha
   local data = runtime.pd.get_all()[1]
   local expected = {runtime.vehicle_speed.control(vehicle, path, 1, 2, .1, data)}
   local expected_progress = data.vehicle_trajectory.s
-  for _, revision in ipairs({false, 2, 3}) do
+  for _, revision in ipairs({false, 2, 3, 4}) do
     data.vehicle_trajectory = {path = path, entity = vehicle, s = 10000, revision = revision or nil}
     local actual = {runtime.vehicle_speed.control(vehicle, path, 1, 2, .1, data)}
     assert(math.abs(actual[1] - expected[1]) < 1e-10)
     assert(math.abs(actual[2].x - expected[2].x) < 1e-10 and math.abs(actual[2].y - expected[2].y) < 1e-10)
     assert(math.abs(data.vehicle_trajectory.s - expected_progress) < 1e-10)
-    assert(data.vehicle_trajectory.revision == 4)
+    assert(data.vehicle_trajectory.revision == 5)
   end
 end)
 

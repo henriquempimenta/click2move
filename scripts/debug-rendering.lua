@@ -3,11 +3,13 @@
 local Config = require("scripts/config")
 local VehicleSpeed = require("scripts/vehicle-speed")
 local Trajectory = require("scripts/vehicle-trajectory")
+local Bezier = require("scripts/bezier-preview")
 local DebugRendering = {}
 local CYAN = {r = .1, g = .8, b = 1, a = .65}
 local ORANGE = {r = 1, g = .45, b = .05, a = .7}
 local MAGENTA = {r = 1, g = .15, b = .8, a = 1}
 local WHITE = {r = 1, g = 1, b = 1, a = 1}
+local GREEN = {r = .2, g = 1, b = .25, a = 1}
 local MODES = {"game", "chart"}
 local MAX_OBJECTS = 4096
 
@@ -18,8 +20,9 @@ function DebugRendering.draw(player, data, goal, points, surface, objects)
   local car = entity.type == "car"
   local geometry, available, tracking
   if car and goal.path then
-    geometry, available, tracking = VehicleSpeed.trajectory(entity, goal.path, goal.path_clearance)
+    geometry, available, tracking = VehicleSpeed.trajectory(entity, goal.path, goal.path_clearance, nil, goal, data.preview)
   end
+  local bezier = config.debug_bezier and geometry and Bezier.build(goal.path, math.max(0, available-tracking))
   local count, limited = 0, false
   local function draw(kind, options, mode)
     if count >= MAX_OBJECTS then limited = true; return end
@@ -72,6 +75,19 @@ function DebugRendering.draw(player, data, goal, points, surface, objects)
         end
       end
     end
+    if bezier then
+      for _, piece in ipairs(bezier.pieces) do
+        if count >= MAX_OBJECTS then limited = true; break end
+        local steps = piece.kind == "line" and 1 or 32
+        local previous = piece.a
+        for step = 1, steps do
+          local point = Bezier.position(piece, step/steps)
+          draw("draw_line", {color = GREEN, width = 2, from = previous, to = point}, mode)
+          previous = point
+          if count >= MAX_OBJECTS then limited = true; break end
+        end
+      end
+    end
     if config.debug_margins and not data.is_straight_line_move and entity.type ~= "spider-vehicle" then
       corridor(goal.path_clearance, CYAN, mode)
       if geometry then corridor(math.max(0, available - tracking), ORANGE, mode) end
@@ -82,6 +98,11 @@ function DebugRendering.draw(player, data, goal, points, surface, objects)
     config.debug_margins and (margin ~= nil and string.format("%.2f", margin) or "?") or "-",
     config.debug_margins and available and string.format("%.2f", math.max(0, available - tracking)) or "-",
     config.debug_curve and geometry and {"click2move.debug-reference"} or "-"}
+  if bezier then
+    text = {"", text, "\n", {"click2move.debug-bezier-reference"}}
+    if bezier.fallback then text = {"", text, "\n", {"click2move.debug-bezier-fallback"}} end
+    if bezier.limited then text = {"", text, "\n", {"click2move.debug-bezier-limit"}} end
+  end
   for _, mode in ipairs(MODES) do
     -- The legend always survives an object cap and states that the overlay is partial.
     objects[#objects + 1] = rendering.draw_text{

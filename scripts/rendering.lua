@@ -76,9 +76,10 @@ local function draw_path(player, data, goal, index, surface)
   state.drawn = true
   local config = Config.get(player.index)
   state.debug_margins, state.debug_curve = config.debug_margins, config.debug_curve
+  state.debug_bezier = config.debug_bezier
   state.preview = data.preview
   local vehicle = data.move_entity and data.move_entity.type ~= "character"
-  local debug = config.debug_margins or config.debug_curve
+  local debug = config.debug_margins or config.debug_curve or config.debug_bezier
   local color = debug and {r = 1, g = 0.85, b = 0.1, a = 0.95} or copy_color(player.color, (vehicle and 0.5 or 0.9) * (index > 1 and 0.5 or 1))
   local points = {}
   for _, waypoint in ipairs(goal.path or {}) do
@@ -110,6 +111,7 @@ local function draw_path(player, data, goal, index, surface)
   if debug then
     DebugRendering.draw(player, data, goal, merge_straight_runs(points), surface, state.path_objects)
   end
+  state.curve_reference = goal.vehicle_reference and goal.vehicle_reference.geometry
 end
 
 function Rendering.render_goal(player_index, data, goal, index)
@@ -141,7 +143,7 @@ function Rendering.render_goal(player_index, data, goal, index)
       end
     end
     state.index = index
-    if not state.debug_margins and not state.debug_curve then
+    if not state.debug_margins and not state.debug_curve and not state.debug_bezier then
       for _, object in ipairs(state.path_objects) do
         if object.valid then
           local vehicle = entity and entity.type ~= "character"
@@ -152,7 +154,9 @@ function Rendering.render_goal(player_index, data, goal, index)
   end
   local config = Config.get(player_index)
   if not state.drawn or state.path ~= goal.path or state.debug_margins ~= config.debug_margins
-      or state.debug_curve ~= config.debug_curve or state.preview ~= data.preview then
+      or state.debug_curve ~= config.debug_curve or state.debug_bezier ~= config.debug_bezier or state.preview ~= data.preview
+      or ((config.debug_curve or config.debug_bezier or config.debug_margins)
+        and state.curve_reference ~= (goal.vehicle_reference and goal.vehicle_reference.geometry)) then
     draw_path(player, data, goal, index, surface)
   end
 end

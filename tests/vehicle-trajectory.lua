@@ -413,6 +413,7 @@ test("merge certification has one fixed work budget on long winding paths", func
   assert(plan.merge_work > 0 and plan.merge_work <= 8192)
   assert(plan.racing_work > 0 and plan.racing_work <= 8192)
   assert(plan.bridge_work > 0 and plan.bridge_work <= 32768 + 64, "bridges overran their work budget")
+  assert(plan.build_work <= Trajectory.WORK_LIMIT)
   assert(plan.total_length > 0)
   near(Trajectory.source_distance(plan, plan.total_length), plan.path_distances[#points])
   local last = -1
@@ -892,6 +893,31 @@ test("easy long staircases still compress after optional refinement is exhausted
     local distance = plan.total_length * step / 500
     assert(path_distance(Trajectory.sample(plan, distance), points) <= 2.08 + 1e-8)
     near(Trajectory.at_source(plan, Trajectory.source_distance(plan, distance)), distance, 1e-7)
+  end
+end)
+
+test("a worse vehicle-cost refit restores the banked certified reference", function()
+  local points = {point(0), point(100), point(100, 5), point(105, 10), point(105, 100), point(200, 100)}
+  local calls = 0
+  local function reject(pieces)
+    calls = calls+1
+    for _, piece in ipairs(pieces) do if piece.polished or piece.terminal then return 1000 end end
+    return 1
+  end
+  local plan = Trajectory.build(path(points), 2, nil, reject)
+  assert(calls >= 2 and calls <= 3 and plan.refit_rejected and plan.scoring_work > 0)
+  local sum = plan.scoring_work
+  for _, stage in ipairs({"simplify", "merge", "racing", "bridge", "polish", "terminal"}) do sum = sum+(plan[stage.."_work"] or 0) end
+  assert(sum == plan.build_work and sum <= plan.work_limit)
+  for _, piece in ipairs(plan.segments) do assert(not piece.polished and not piece.terminal) end
+  local previous = -1
+  for step = 0, 500 do
+    local s = plan.total_length*step/500
+    assert(path_distance(Trajectory.sample(plan, s), points) <= 2+1e-7)
+    local source = Trajectory.source_distance(plan, s)
+    assert(source >= previous)
+    near(Trajectory.at_source(plan, source), s, 1e-6)
+    previous = source
   end
 end)
 

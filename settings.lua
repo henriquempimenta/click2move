@@ -50,6 +50,13 @@ data:extend({
   },
   {
     type = "bool-setting",
+    name = "c2m-debug-bezier",
+    setting_type = "runtime-per-user",
+    default_value = false,
+    order = "a-f-a"
+  },
+  {
+    type = "bool-setting",
     name = "c2m-debug-preview",
     setting_type = "runtime-per-user",
     default_value = false,

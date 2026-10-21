@@ -9,7 +9,7 @@
 local Trajectory = {}
 -- Saved arc-length anchors belong to a particular reference construction.
 -- Bump when that construction changes, so old anchors are projected afresh.
-Trajectory.REVISION = 4
+Trajectory.REVISION = 5
 
 local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
 local TAU = 2 * math.pi
@@ -35,7 +35,7 @@ local TERMINAL_PIECES = 16
 -- Deterministic weighted work, shared by all optional refinement stages.
 -- Elapsed-time cutoffs could produce different curves on multiplayer peers.
 -- Required linear construction still finishes when refinement runs out.
-Trajectory.WORK_LIMIT = 40960
+Trajectory.WORK_LIMIT = 32768
 local function budget(limit, parent)
   local work = {limit = limit, remaining = limit, used = 0, parent = parent}
   work.build = parent and parent.build or work
@@ -131,8 +131,11 @@ end
 
 local function collapse(path, distances)
   local points = {}
+  local previous, source = nil, 0
   for index, waypoint in ipairs(path) do
     local p = waypoint.position
+    if previous then source = source + distance(previous, p) end
+    distances[index], previous = source, p
     local last = points[#points]
     if last and last.position.x == p.x and last.position.y == p.y then
       -- Retain the latest index for repeated endpoints without a zero leg.
@@ -1015,14 +1018,11 @@ end
 ---@param path PathfinderWaypoint[]
 ---@param clearance? number usable clearance; nil/zero keeps the original polyline
 ---@return table plan
-function Trajectory.build(path, clearance, work_limit)
+function Trajectory.build(path, clearance, work_limit, score)
   local shared = budget(math.max(0, math.min(Trajectory.WORK_LIMIT, work_limit or Trajectory.WORK_LIMIT)))
   local distances = {}
   local plan = {segments = {}, total_length = 0, path_distances = distances,
     waypoint_segments = {}, waypoint_s = {}}
-  for index, waypoint in ipairs(path) do
-    distances[index] = index == 1 and 0 or distances[index - 1] + distance(path[index - 1].position, waypoint.position)
-  end
   if #path == 0 then return plan end
   plan.point = copy(path[#path].position)
   local original = collapse(path, distances)
@@ -1118,10 +1118,33 @@ function Trajectory.build(path, clearance, work_limit)
     end
   end
   if clearance and clearance > 0 then
+    -- Bank a certified route before optional refitting. Scoring is linear,
+    -- uses the caller's vehicle model, and is charged to the shared budget.
+    local bank, bank_cost
+    local scoring_work = (#plan.segments + 2) * 12 + 4
+    if score and #plan.segments <= 128 and spend(shared, scoring_work) then
+      bank, bank_cost = plan.segments, score(plan.segments)
+      plan.scoring_work = scoring_work
+    end
+    local function retain_best()
+      if bank and plan.segments ~= bank then
+        local cost = #plan.segments <= #bank+2 and score(plan.segments) or math.huge
+        if cost <= bank_cost then
+          bank, bank_cost = plan.segments, cost
+        else
+          -- Arrays share unchanged pieces; only arc-length offsets mutate.
+          -- Reaccumulate when reverting instead of copying every piece.
+          plan.segments, plan.total_length, plan.refit_rejected = {}, 0, true
+          for _, piece in ipairs(bank) do append(plan, piece, piece_length(piece)) end
+        end
+      end
+    end
     local polish = budget(math.min(POLISH_WORK, math.max(0, shared.remaining - 512)), shared)
     polish_bends(plan, original, clearance, polish)
+    retain_best()
     local terminal = budget(TERMINAL_WORK, shared)
     terminal_curve(plan, original, clearance, terminal)
+    retain_best()
     plan.polish_work, plan.terminal_work = polish.used, terminal.used
   end
   -- Source distances are monotone; find each containing piece once instead
@@ -1131,8 +1154,12 @@ function Trajectory.build(path, clearance, work_limit)
     while segment_index < count and plan.segments[segment_index].path_end < source do segment_index = segment_index + 1 end
     local segment = plan.segments[segment_index]
     plan.waypoint_segments[index] = segment and segment_index or 0
-    plan.waypoint_s[index] = segment and segment.start_s
-      + fraction(source, segment.path_start, segment.path_end) * segment.length or 0
+    if count == 1 and segment.path_start == 0 and segment.path_end == segment.length then
+      plan.waypoint_s[index] = source
+    else
+      plan.waypoint_s[index] = segment and segment.start_s
+        + fraction(source, segment.path_start, segment.path_end) * segment.length or 0
+    end
   end
   plan.build_work, plan.work_limit = shared.used, shared.limit
   plan.construction_attempts = shared.attempts or 0

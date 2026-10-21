@@ -187,6 +187,39 @@ local function turning_speed(model, radius)
   return math.max(MIN_CORNER_SPEED, model.tank and turn or turn * turn)
 end
 
+-- A cheap construction-time ranking, not the safety speed profile. Integrate
+-- the same turning law and frictionless braking d(v^3)/ds = 3*brake backwards
+-- to a stop. Omitting acceleration/friction keeps this deterministic and
+-- linear rather than running the controller for every proposed trajectory.
+local function travel_time(model, segments)
+  local total, exit = 0, 0
+  for index = #segments, 1, -1 do
+    local piece = segments[index]
+    local length = piece.length or (piece.radius and piece.radius * math.abs(piece.sweep)) or 0
+    local cap = piece.radius and turning_speed(model, piece.radius) or math.huge
+    local following = segments[index+1]
+    if following and piece.tangent and following.tangent then
+      local x, y = piece.tangent.x, piece.tangent.y
+      if piece.radius then
+        local c, s = math.cos(piece.sweep), math.sin(piece.sweep)
+        x, y = x*c-y*s, y*c+x*s
+      end
+      local angle = math.acos(math.max(-1, math.min(1, x*following.tangent.x+y*following.tangent.y)))
+      if angle > .01 then
+        exit = math.min(exit, MIN_CORNER_SPEED)
+        total = total + angle / (2*math.pi*model.rotation*(model.tank and 1 or math.sqrt(MIN_CORNER_SPEED)))
+      end
+    end
+    exit = math.min(exit, cap)
+    local entry = math.min(cap, (exit ^ 3 + 3 * model.brake * length) ^ (1 / 3))
+    local braking = (entry ^ 3 - exit ^ 3) / (3 * model.brake)
+    total = total + (entry ^ 2 - exit ^ 2) / (2 * model.brake)
+      + math.max(0, length - braking) / math.max(entry, MIN_CORNER_SPEED)
+    exit = entry
+  end
+  return total
+end
+
 -- The fastest speed that turns a heading error of `angle` within `clearance`
 -- of the line ahead. The turn can only start now: a circle of radius R drifts
 -- R * (1 - cos angle) sideways before the heading is corrected.
@@ -243,10 +276,22 @@ end
 -- Fastest speed at each node from which the vehicle can still slow for every
 -- later corner and stop at the destination. Rebuilt after loading.
 local profiles = setmetatable({}, {__mode = "k"})
+local function same_route(a, b)
+  if a == b then return true end
+  if #a ~= #b or #a > 1024 then return false end
+  for index, waypoint in ipairs(a) do
+    local p, q = waypoint.position, b[index].position
+    if p.x ~= q.x or p.y ~= q.y then return false end
+  end
+  return true
+end
 
-local function profile(path, vehicle, clearance, context)
+local function profile(path, vehicle, clearance, context, owner)
+  if owner and owner.path ~= path then owner = nil end
+  local reference = owner and owner.vehicle_reference
   local cached = profiles[path]
   local same_shape = cached and cached.vehicle == vehicle.name and cached.clearance == clearance
+    and cached.reference == reference and cached.owned == (owner ~= nil)
   -- Fuel and exoskeleton power change braking and a tank's turning rate,
   -- not the route.
   local model = model_for(vehicle, context)
@@ -256,15 +301,39 @@ local function profile(path, vehicle, clearance, context)
       and cached.model.brake == model.brake then
     return cached
   end
-  local available, tracking, geometry
-  if same_shape then
+  local available, tracking, geometry, geometry_clearance
+  -- A committed reference is saved with its goal, so GC, reloads and joining
+  -- peers cannot choose another curve. Live fuel/power still replans speeds.
+  local committed = reference and reference.revision == Trajectory.REVISION
+    and reference.vehicle == vehicle.name and reference.padding == model.shape.padding
+    and reference.request_clearance == clearance and same_route(reference.path, path)
+  if same_shape and (not owner or committed
+      or (cached.model.brake == model.brake and cached.model.rotation == model.rotation)) then
     available, tracking, geometry = cached.available, cached.tracking_reserve, cached.geometry
+    geometry_clearance = cached.geometry_clearance
   else
     -- A rotated rectangle can extend farther sideways than the box supplied to
     -- the pathfinder. Reserve that difference, then some space for tracking.
     available = math.max(0, (clearance or 0) - model.shape.padding)
     tracking = math.min(0.4, available * 0.25)
-    geometry = Trajectory.build(path, available - tracking)
+    geometry_clearance = available - tracking
+    if committed and reference.clearance <= geometry_clearance then
+      geometry, geometry_clearance = reference.geometry, reference.clearance
+    else
+      -- Model-dependent selection needs a serializable owner. Unowned/large
+      -- helper routes keep purely geometric construction, independent of caches.
+      local score = owner and #path <= 1024 and function(pieces) return travel_time(model, pieces) end
+      geometry = Trajectory.build(path, geometry_clearance, nil, score)
+    end
+    -- Changing a margin on this same raw path cannot invalidate a reference
+    -- already certified with less allowance. Keep it if the new route ranks
+    -- worse; no second build or wider safety assumptions are needed.
+    if reference and reference.revision == Trajectory.REVISION and reference.vehicle == vehicle.name
+        and reference.padding == model.shape.padding and reference.clearance <= geometry_clearance
+        and #geometry.segments <= 128 and same_route(reference.path, path)
+        and travel_time(model, reference.geometry.segments) <= travel_time(model, geometry.segments) then
+      geometry, geometry_clearance = reference.geometry, reference.clearance
+    end
   end
   local segments, count = geometry.segments, #geometry.segments
   local limits = {}
@@ -290,15 +359,41 @@ local function profile(path, vehicle, clearance, context)
         limits[index + 1] = math.min(limits[index + 1], MIN_CORNER_SPEED)
       end
     end
-    limits[index] = math.min(cap, speed_before(model, limits[index + 1], segment.length))
+    local exit = limits[index+1]
+    -- Most pieces in a long chain already share the turning ceiling. Avoid
+    -- 32 binary-search iterations when that ceiling is binding, or when the
+    -- conservative stopping-distance model proves it reachable directly.
+    if cap <= exit or (cap < math.huge
+        and stopping_distance(model, cap)+1e-9 < stopping_distance(model, exit)+segment.length) then
+      limits[index] = cap
+    else
+      limits[index] = math.min(cap, speed_before(model, exit, segment.length))
+    end
   end
   cached = {vehicle = vehicle.name, clearance = clearance,
+    reference = reference, owned = owner ~= nil,
+    geometry_clearance = geometry_clearance,
     model = model, limits = limits, available = available, tracking_reserve = tracking,
     geometry = geometry, smooth = available > 0,
     corridor = available > 0 and available or MIN_PLANNING_CLEARANCE,
     tracking = available > 0 and tracking or MIN_PLANNING_CLEARANCE}
   profiles[path] = cached
   return cached
+end
+
+local function commit_reference(owner, path, plan)
+  if plan.committed or not owner or owner.path ~= path then return end
+  local old = owner.vehicle_reference
+  if #path <= 1024 and #plan.geometry.segments <= 128 then
+    if not old or old.path ~= path or old.geometry ~= plan.geometry or old.request_clearance ~= plan.clearance
+        or old.revision ~= Trajectory.REVISION or old.padding ~= plan.model.shape.padding or old.vehicle ~= plan.vehicle then
+      owner.vehicle_reference = {path = path, geometry = plan.geometry, clearance = plan.geometry_clearance,
+        request_clearance = plan.clearance, padding = plan.model.shape.padding,
+        vehicle = plan.vehicle, revision = Trajectory.REVISION}
+    end
+  else owner.vehicle_reference = nil end
+  plan.reference = owner.vehicle_reference
+  plan.committed = true
 end
 
 -- Highest speed for the vehicle now, forwards or in reverse, or nil when its
@@ -311,8 +406,10 @@ end
 ---@return number?
 function VehicleSpeed.control(vehicle, path, index, clearance, step, state, context)
   if not path or #path == 0 then return nil end
-  local plan = profile(path, vehicle, clearance, context)
+  local owner = state and state.goals and state.goals[1]
+  local plan = profile(path, vehicle, clearance, context, owner)
   if not plan then return nil end
+  commit_reference(owner, path, plan)
   index = math.max(1, math.min(index, #path))
   local position, geometry = vehicle.position, plan.geometry
   local history = state and state.vehicle_trajectory
@@ -385,8 +482,9 @@ function VehicleSpeed.limit(vehicle, path, index, clearance, step, context)
 end
 
 -- The exact reference used for steering and its curvature speed limits.
-function VehicleSpeed.trajectory(vehicle, path, clearance, context)
-  local plan = profile(path, vehicle, clearance, context)
+function VehicleSpeed.trajectory(vehicle, path, clearance, context, owner, preview)
+  local plan = profile(path, vehicle, clearance, context, owner)
+  if plan and preview then commit_reference(owner, path, plan) end
   return plan and plan.geometry, plan and plan.available, plan and plan.tracking_reserve
 end
 

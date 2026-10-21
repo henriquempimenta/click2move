@@ -46,6 +46,8 @@ In **Settings → Mod settings → Per player**, enable **Debug: Draw Path Margi
 
 Enable **Debug: Preview Without Moving**, then middle-click a destination to calculate its route without starting movement. A vehicle already moving brakes to a stop first. Change Character Margin or Vehicle Path Margin to recalculate the preview and compare the result. The GUI identifies paused previews; turning preview off keeps the displayed route paused until you click a fresh destination. Cancel clears the overlay. Queued previews calculate the first three paths, matching the normal prefetch window. Flight and spidertron routes have no pathfinder margin or car steering curve. Very large overlays are capped and display a notice when partial.
 
+Enable **Debug: Preview Bézier Curve** to compare an experimental green curve with the magenta steering reference. The green curve is visual only: vehicles continue to use the magenta route. Its cubic bends have zero endpoint curvature and are certified inside the usable smoothing allowance by subdividing their control hulls. Reversals, bends that cannot be certified, or an exhausted preview budget retain the original legs. Long previews are bounded and label missing or unsmoothed portions. This is a local curve construction, separate from the offline convex solver experiments. It smooths bends individually and does not optimize driving time or guarantee the lowest possible peak curvature, even with a large margin.
+
 ## Known Issues
 
 *   **Flickering with Mech Armor**: When moving horizontally with mech armor, the character sprite may flicker.
@@ -63,6 +65,7 @@ You can adjust these settings in `Settings -> Mod settings`.
 | **Debug: Pathfinding / Queue / Stuck Recovery / Vehicle Control** | `Bool` | Per-Player | `true` | Four separate filters for debug output. Only used when Debug mode is on.                        |
 | **Debug: Draw Path Margins**       | `Bool`  | Per-Player        | `false` | Draws the recorded margin and usable smoothing allowance with a color legend. |
 | **Debug: Draw Smooth Curve**       | `Bool`  | Per-Player        | `false` | Draws the vehicle's actual steering reference in magenta. |
+| **Debug: Preview Bézier Curve**    | `Bool`  | Per-Player        | `false` | Draws a certified experimental curve in green; never changes driving. |
 | **Debug: Preview Without Moving**  | `Bool`  | Per-Player        | `false` | Calculates paused routes; margin changes recalculate the preview. Independent of chat debug mode. |
 | **Character margin**              | `Float` | Per-Player        | `0.45`  | The safety margin added to the character's bounding box for pathfinding. Larger values avoid tighter gaps. |
 | **Update interval**               | `Int`   | Global            | `1`     | The number of game ticks between movement updates. Lower is smoother but uses more UPS.                 |
@@ -155,6 +158,27 @@ python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --profile-build
 This runs 12 routes, including a recorded 403-node path and synthetic paths up to 16,384 nodes. Each gets one warmup and five timed builds, one build per tick. The runner reports median and maximum construction times, curve pieces, tightest radius, refinement work and construction attempts. It checks complete results, repeatable geometry metadata and work limits; timings have no hardware-dependent pass threshold.
 
 Optional curve refinement shares a deterministic weighted work budget, including rejected construction attempts and clearance checks. Results do not depend on elapsed time, so multiplayer peers make the same decisions. Required path processing still grows with the number of nodes: very large paths can exceed one tick even after refinement stops. Compare construction times alongside the driving suites, since reducing search too far can produce tighter bends and slower journeys.
+
+The refinement cap is 32,768 work units. Smaller caps reduced construction cost in synthetic benchmarks but either failed a generated Vulcanus route or slowed the hardest routes, so they are not the production default. For owned routes with at most 1,024 raw waypoints, 128 pieces and enough remaining work, the planner compares its certified route before refitting, after bend polishing and after the terminal-circle change. A linear estimate uses the vehicle's turning law, braking force and explicit heading changes; it omits acceleration and friction and ranks candidates without replacing the conservative safety speed profile. A better certified curve may also be reused when allowance increases on an identical raw path, including a fresh pathfinder result with the same coordinates. The committed reference is saved with its goal, so cache collection, reloads and late joins cannot discard that choice. Live fuel and equipment changes still update speed limits. Normal debug drawing only reads this reference. This preserves previously found candidates, rather than guaranteeing globally optimal or monotonic results on newly requested paths.
+
+Offline curve experiments compare the current planner at three work budgets, a length-minimizing convex program followed by smoothing, and cubic Bézier fits with continuous first and second derivatives. The Bézier fits constrain every control point relative to a straight reference piece, proving containment between samples too. Their bending penalty is a convex surrogate in the reference parameter, rather than geometric curvature or driving time. These optional tools stay outside the mod package:
+
+```sh
+python3 -m venv /tmp/c2m-bench-venv
+/tmp/c2m-bench-venv/bin/pip install -r tools/benchmark-requirements.txt
+/tmp/c2m-bench-venv/bin/python tools/benchmark_curves.py --lua lua5.2 --output /tmp/c2m-curves
+python3 tools/benchmark_native_budgets.py --factorio /path/to/bin/x64/factorio --output /tmp/c2m-native-budgets
+```
+
+The offline tool writes CSV/JSON measurements, solver status, source metadata and a curve comparison image. It uses four **smoothing allowances after vehicle-body and tracking reserves**, not four player margin settings. Python solver times include model construction and are not Lua runtime predictions. The curvature-only time diagnostic assumes instant acceleration and braking with perfect tracking; it cannot replace native arrival measurements. Fixed-correspondence constraints also restrict the convex candidates more than the production geometric corridor. Nearly singular curves omit that time diagnostic, and an `optimal_inaccurate` solver status provides no optimality certificate even when geometry checks pass.
+
+The visual-only Bézier overlay has a native rendering check too. It creates and destroys actual engine rendering objects at five margins and verifies that the preview does not move the vehicle or change controller progress:
+
+```sh
+python3 tests/engine/run.py --factorio /path/to/bin/x64/factorio --debug-preview
+```
+
+The native budget comparison uses isolated mod copies and records performance deadline/speed-floor violations while retaining collision, stuck-recovery, completion and destination assertions. Run it without other CPU benchmarks. Its output directory must not exist yet. Add `--target 2.0` for a matching Factorio 2.0 executable.
 
 Cornering round real stone walls has a native suite too:
 

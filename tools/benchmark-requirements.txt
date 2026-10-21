@@ -1,0 +1,5 @@
+# Optional offline experiments only; production and regular tests need none.
+numpy
+scipy
+cvxpy
+matplotlib

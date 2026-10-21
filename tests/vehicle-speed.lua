@@ -696,5 +696,73 @@ test("vehicles without braking and turning data keep their previous control", fu
   equal(runtime.vehicle_speed.limit(state.entity, path, 2, 2, 0), nil)
 end)
 
+test("turning ceilings avoid repeated brake searches without changing the backward profile", function()
+  local function private(fn, name)
+    for index = 1, 100 do
+      local key, value = debug.getupvalue(fn, index)
+      if key == name then return value elseif not key then break end
+    end
+    error("missing helper "..name)
+  end
+  for _, prototype in ipairs({CAR, TANK}) do
+    local state, runtime = fixture(prototype, 1)
+    local profile = private(runtime.vehicle_speed.trajectory, "profile")
+    local before, turn = private(profile, "speed_before"), private(profile, "turning_speed")
+    local path = {}
+    for index = 1, 200 do path[index] = {position = point(index*10, index%2*10)} end
+    local calls = 0
+    debug.sethook(function()
+      if debug.getinfo(2, "n").name == "speed_before" then calls = calls+1 end
+    end, "c")
+    local geometry = runtime.vehicle_speed.trajectory(state.entity, path, 3)
+    debug.sethook()
+    local lines = 0
+    for _, piece in ipairs(geometry.segments) do if not piece.radius then lines = lines+1 end end
+    assert(calls <= lines+(#geometry.segments-lines)/10,
+      "long turning chain repeated binary brake searches beyond its straight pieces")
+    local cached = private(profile, "profiles")[path]
+    local limit = 0
+    for index = #geometry.segments, 1, -1 do
+      local piece = geometry.segments[index]
+      limit = math.min(piece.radius and turn(cached.model, piece.radius) or math.huge,
+        before(cached.model, limit, piece.length))
+      near(cached.limits[index], limit, 1e-9, "optimized turning ceiling changed the braking envelope")
+    end
+  end
+end)
+
+test("increasing allowance on the same raw hairpin retains a better certified curve", function()
+  local file = assert(io.open("tests/engine/build-profile.lua"))
+  local source = file:read("*a"); file:close()
+  local trace = source:match("local hairpin_trace = %[%[(.-)%]%]")
+  local path = {}
+  for x, y in trace:gmatch("([%-%d%.]+),([%-%d%.]+)") do path[#path+1] = {position = point(tonumber(x), tonumber(y))} end
+  local state, runtime = fixture(CAR, 1)
+  local goal = {path = path}
+  local smaller = runtime.vehicle_speed.trajectory(state.entity, path, 3, nil, goal, true)
+  local larger = runtime.vehicle_speed.trajectory(state.entity, path, 4, nil, goal, true)
+  assert(larger == smaller, "larger margin discarded the faster certified hairpin")
+  local copy = {}
+  for index, waypoint in ipairs(path) do copy[index] = {position = point(waypoint.position.x, waypoint.position.y)} end
+  goal.path = copy
+  local refreshed = runtime.vehicle_speed.trajectory(state.entity, copy, 4, nil, goal, true)
+  assert(refreshed == smaller, "fresh pathfinder table lost the better certified reference")
+  local env = setmetatable({prototypes = {tile = TILES}, require = require}, {__index = _G})
+  local cold = assert(loadfile("scripts/vehicle-speed.lua", "t", env))()
+  local context = runtime.vehicle_speed.create_context(state.entity)
+  context.model.brake = context.model.brake*2
+  collectgarbage("collect")
+  assert(cold.trajectory(state.entity, copy, 4, context, goal) == smaller,
+    "a cold script VM or changed braking model discarded the saved curve")
+  local narrow = runtime.vehicle_speed.trajectory(state.entity, copy, 1, nil, goal, true)
+  assert(narrow ~= larger, "a reduced allowance reused an uncertified wider curve")
+  local changed = {}
+  for index, waypoint in ipairs(path) do changed[index] = {position = point(waypoint.position.x, waypoint.position.y)} end
+  changed[200].position.y = changed[200].position.y+.25
+  goal.path = changed
+  local different = runtime.vehicle_speed.trajectory(state.entity, changed, 4, nil, goal, true)
+  assert(different ~= larger and different ~= narrow, "a different raw path reused stale geometry")
+end)
+
 for _, entry in ipairs(tests) do entry[2](); print("PASS " .. entry[1]) end
 print(#tests .. " vehicle speed tests passed")

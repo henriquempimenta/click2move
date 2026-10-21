@@ -1,4 +1,15 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.1.17
+Date: 2026-10-21
+  Features:
+    - Add a per-player debug option to compare a green, visual-only cubic Bezier curve with the magenta driving reference. Certify its control hulls against the usable path corridor, join straight legs with zero endpoint curvature, and retain original legs when smoothing cannot be certified. Bound preview input and work and label incomplete previews. This local preview does not optimize driving time or control movement.
+  Changes:
+    - Reduce the trajectory refinement cap from 40960 to 32768 work units. Reject smaller caps that slowed or failed generated terrain routes in native tests.
+    - Rank certified bend and terminal refits using a bounded estimate of vehicle turning and braking time, retaining a better earlier stage. Reuse a better curve when a larger allowance is applied to the same raw route, including identical fresh pathfinder results.
+    - Save committed references with their goals so cache collection, save/load and late joins do not change curve selection; live fuel and power changes still update speed limits. Reproject obsolete saved progress anchors.
+    - Combine source-distance accumulation with duplicate/straight-node collapse and avoid redundant interpolation on exact straight paths.
+    - Skip repeated braking-limit binary searches when the turning ceiling already binds or is directly permitted by the conservative stopping-distance model.
+---------------------------------------------------------------------------------------------------
 Version: 0.1.16
 Date: 2026-10-18
   Compatibility:

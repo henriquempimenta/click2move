@@ -12,6 +12,7 @@ local VehicleSpeed = require("scripts/vehicle-speed")
 local Pathfinding = require("scripts/pathfinding")
 local Mode = require("scripts/mode")
 local GUI = require("scripts/gui")
+local Rendering = require("scripts/rendering")
 
 local Movement = {}
 
@@ -283,6 +284,10 @@ function Movement.handle_vehicle(player_index, data, player, vehicle)
   local speed_context = VehicleSpeed.create_context(vehicle)
   local speed_limit, curve_target, on_curve, reached = VehicleSpeed.control(vehicle, goal.path,
     data.current_waypoint, goal.path_clearance, speed * config.update_interval, data, speed_context)
+  if (config.debug_curve or config.debug_bezier or config.debug_margins) and goal.rendering
+      and goal.vehicle_reference and goal.rendering.curve_reference ~= goal.vehicle_reference.geometry then
+    Rendering.render_goal(player_index, data, goal, 1)
+  end
   if reached and reached > data.current_waypoint then
     advanced = advanced + reached - data.current_waypoint
     data.current_waypoint = reached

@@ -14,6 +14,7 @@ local PlayerData = {}
 ---@field path_id? uint32
 ---@field path? PathfinderWaypoint[]
 ---@field path_clearance? number margin the pathfinder kept clear around path; nil when unknown
+---@field vehicle_reference? table committed certified curve, saved for deterministic reload/join behavior
 ---@field retry_count? uint32
 ---@field retry_at? uint32
 

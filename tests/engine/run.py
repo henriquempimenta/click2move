@@ -81,6 +81,7 @@ def main():
     parser.add_argument("--fast-cars", action="store_true", help="Run native high-speed vehicle corridor checks (needs the quality mod)")
     parser.add_argument("--physics", action="store_true", help="Measure native braking against production speed limits (needs the quality mod)")
     parser.add_argument("--profile-build", action="store_true", help="Profile trajectory construction in native Factorio (reports times without hardware-specific deadlines)")
+    parser.add_argument("--debug-preview", action="store_true", help="Check Bezier/margin/reference rendering and zero movement in native Factorio")
     parser.add_argument("--vulcanus", action="store_true", help="Drive fast cars across generated Vulcanus terrain (needs Space Age)")
     parser.add_argument("--space-age", action="store_true", help="Enable Space Age and include native powered mech armor flight")
     parser.add_argument("--target", choices=load_targets(ROOT)[0], default=FACTORIO_VERSION,
@@ -108,6 +109,9 @@ def main():
         return
     if args.profile_build:
         run_profile_build(factorio, data, workspace)
+        return
+    if args.debug_preview:
+        run_debug_preview(factorio, data, workspace)
         return
     if args.vulcanus:
         run_vulcanus(factorio, data, workspace)
@@ -311,6 +315,30 @@ def run_fast_cars(factorio, data, workspace):
         report = output.split(marker + " ticks:top_speed=")[1].split()[0]
         print(f"PASS interval {interval}: 13 native high-speed corridor cases (arrival ticks:top speed {report})", flush=True)
     print("PASS 26 native high-speed corridor scenarios across intervals 1 and 10", flush=True)
+
+
+def run_debug_preview(factorio, data, workspace):
+    root = workspace / "debug-preview"
+    mod = root / "mods/click2move"
+    mod.mkdir(parents=True)
+    install_mod(mod)
+    (mod / "control.lua").write_text((ROOT / "tests/engine/debug-preview.lua").read_text())
+    (mod.parent / "mod-list.json").write_text(json.dumps({"mods": [
+        {"name": "base", "enabled": True}, {"name": "click2move", "enabled": True}]
+        + expansion_mods(False)}))
+    write = root / "userdata"
+    write.mkdir()
+    config = root / "config.ini"
+    config.write_text(f"[path]\nread-data={data}\nwrite-data={write}\n[other]\ncheck-updates=false\n")
+    output = run([str(factorio), "--config", str(config), "--mod-directory", str(mod.parent),
+                  "--create", str(root / "fixture.zip"), "--map-gen-seed", "1"], root / "create.log")
+    if "C2M_NATIVE_BEZIER_PREVIEW_OK margins=5" not in output:
+        raise RuntimeError(f"Missing native debug-preview assertions; see {root / 'create.log'}")
+    output = run([str(factorio), "--config", str(config), "--mod-directory", str(mod.parent),
+                  "--benchmark", str(root / "fixture.zip"), "--benchmark-ticks", "1", "--benchmark-runs", "1"], root / "reload.log")
+    if "C2M_NATIVE_REFERENCE_RELOAD_OK" not in output:
+        raise RuntimeError(f"Missing reference save/load assertions; see {root / 'reload.log'}")
+    print("PASS native Bezier/reference/margin rendering at five margins, zero movement, cleanup and committed-reference save/load", flush=True)
 
 
 def run_profile_build(factorio, data, workspace):
